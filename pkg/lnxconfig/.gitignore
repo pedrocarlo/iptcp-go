@@ -1,0 +1,10 @@
+/example
+*~
+\#*#
+.\#*
+
+*.o
+
+*.lnx
+
+.DS_Store
