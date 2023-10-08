@@ -25,4 +25,7 @@ func main() {
 		prefixForm := netip.PrefixFrom(iface.AssignedIP, iface.AssignedPrefix.Bits())
 		fmt.Printf("%s has IP %s\n", iface.Name, prefixForm.String())
 	}
+	for pre, ip := range lnxConfig.StaticRoutes {
+		fmt.Printf("Prefix: %s Ip: %s\n", pre.String(), ip.String())
+	}
 }
