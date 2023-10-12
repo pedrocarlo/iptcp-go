@@ -3,12 +3,15 @@ package protocol
 import (
 	"encoding/binary"
 	"fmt"
+	ripheaders "iptcp-pedrocarlo/pkg/rip-headers"
 	lnxconfig "lnxconfig"
+	"log"
 	"net"
 	"net/netip"
 	"os"
 
 	ipv4header "github.com/brown-csci1680/iptcp-headers"
+	"github.com/google/netstack/tcpip/header"
 )
 
 const (
@@ -25,7 +28,12 @@ type Packet struct {
 	Data   []byte
 }
 
-type RoutingTable map[netip.Prefix]netip.Addr
+type Hop struct {
+	Addr netip.Addr
+	Cost uint32
+}
+
+type RoutingTable map[netip.Prefix]Hop
 
 type HandlerFunc = func(*Packet, []interface{})
 
@@ -55,13 +63,20 @@ type Neighbour struct {
 }
 
 func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
+	device := new(Device)
 	interfaces := configInfo.Interfaces
 	neighbours := configInfo.Neighbors
 	isRouter := configInfo.RoutingMode != lnxconfig.RoutingTypeNone
 	interMap := make(map[string]*RouteInterface)
+
+	device.Table = make(RoutingTable)
+	device.Handlers = make(map[uint8]func(*Packet, []interface{}))
+
 	for _, interf := range interfaces {
 		routerInter := RouteInterface{Name: interf.Name, Ip: interf.AssignedIP, Prefix: interf.AssignedPrefix, UdpPort: interf.UDPAddr, IsUp: true}
 		interMap[interf.Name] = &routerInter
+		// Populating table with interface local prefixes
+		device.Table[interf.AssignedPrefix.Masked()] = Hop{Addr: interf.AssignedIP, Cost: 0}
 	}
 
 	neighbourSlice := make([]Neighbour, 0)
@@ -69,10 +84,15 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 		neighbourSlice = append(neighbourSlice, Neighbour{InterfaceName: nei.InterfaceName, Ip: nei.DestAddr, UdpPort: nei.UDPAddr})
 	}
 
-	device := Device{Table: make(RoutingTable), Interfaces: interMap, Neighbours: neighbourSlice, IsRouter: isRouter, RoutingMode: configInfo.RoutingMode, RipNeighbors: configInfo.RipNeighbors, Handlers: make(map[uint8]func(*Packet, []interface{}))}
+	device.Interfaces = interMap
+	device.Neighbours = neighbourSlice
+	device.IsRouter = isRouter
+	device.RoutingMode = configInfo.RoutingMode
+	device.RipNeighbors = configInfo.RipNeighbors
+	// device := Device{Table: make(RoutingTable), Interfaces: interMap, Neighbours: neighbourSlice, IsRouter: isRouter, RoutingMode: configInfo.RoutingMode, RipNeighbors: configInfo.RipNeighbors, Handlers: make(map[uint8]func(*Packet, []interface{}))}
 
-	for pre, route := range lnxconfig.LnxConfig.StaticRoutes {
-		device.Table[pre] = route
+	for pre, route := range configInfo.StaticRoutes {
+		device.Table[pre] = Hop{Addr: route, Cost: 0}
 	}
 
 	device.RegisterRecvHandler(testProtocol, TestHandler)
@@ -99,7 +119,7 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 	}
 	device.Listeners = listeners
 
-	return &device, nil
+	return device, nil
 }
 
 // Probably communicate via channels
@@ -146,56 +166,61 @@ func (d *Device) RegisterRecvHandler(protocolNum uint8, callbackFunc HandlerFunc
 
 func (d *Device) createPacket(dst netip.Addr, protocolNum uint8, data []byte) *Packet {
 	h := ipv4header.IPv4Header{}
-	h.Version = 4
-	h.Len = 20                     // TODO just put it to no fail
-	h.TOS = 0                      // Dont know what to put here
+	h.Version = ipv4header.Version
+	h.Len = ipv4header.HeaderLen
+	h.TOS = 0
 	h.TotalLen = h.Len + len(data) // Believe this is correct
-	h.ID = 0                       // TODO see what to put here
-	h.Flags = 0                    // TODO
-	h.FragOff = 0                  // TODO
-	h.TTL = 32                     // TODO should be 16 just setting to 32 to test
+	h.ID = 0
+	h.Flags = 0
+	h.FragOff = 0
+	h.TTL = 16
 	h.Protocol = int(protocolNum)
 
 	// Default interface
 	h.Src = d.Interfaces["if0"].Ip
 	h.Dst = dst
 	h.Options = make([]byte, 0)
-	h.Checksum = ComputeCheckSum(&h)
+	h.Checksum = 0
+	headerBytes, err := h.Marshal()
+	if err != nil {
+		log.Fatalln("Error marshalling header:  ", err)
+	}
+
+	h.Checksum = int(ComputeChecksum(headerBytes))
 	return &Packet{Header: h, Data: data}
 }
 
 // TODO see if different interfaces interfere in this search for ip
 func (d *Device) findIp(dst netip.Addr) (*netip.AddrPort, string, error) {
-	prefix := d.getDstPrefix(dst)
+	prefix, ok := d.getDstPrefix(dst)
 
-	// Find neighbour to forward
+	if !ok {
+		return nil, "", fmt.Errorf("could not find a neighbour to send")
+	}
+
 	var udpAddr netip.AddrPort
 	var iface string
-	found := false
+	hop := d.Table[prefix]
+
+	var next netip.Addr
+	if prefix.Bits() == 0 || hop.Cost > 0 {
+		next = hop.Addr
+	} else {
+		next = dst
+	}
+	fmt.Printf("%s\n", next)
+
 	for _, neighbour := range d.Neighbours {
-		if neighbour.Ip == dst {
+		if neighbour.Ip == next {
 			udpAddr = neighbour.UdpPort
 			iface = neighbour.InterfaceName
-			found = true
 			break
 		}
 	}
-	if !found {
-		addr, ok := d.Table[prefix]
-		if !ok {
-			// Find router to forward
-			for _, nei := range d.Neighbours {
-				if nei.Ip == addr {
-					udpAddr = nei.UdpPort
-					iface = nei.InterfaceName
-				}
-			}
-		}
-	}
 
-	// If error probably drop packert
+	// If error probably drop packet
 	if iface == "" {
-		return nil, "", fmt.Errorf("could not find a neighbour to send")
+		return nil, "", fmt.Errorf("could not find interface to send")
 	}
 
 	return &udpAddr, iface, nil
@@ -209,8 +234,6 @@ func (d *Device) sendPacket(p *Packet) (int, error) {
 	}
 
 	conn := d.Listeners[iface]
-
-	// conn, err := net.Dial("udp4", udpAddr.String())
 	if err != nil {
 		return 0, err
 	}
@@ -242,25 +265,44 @@ func (d *Device) SendIP(dst netip.Addr, protocolNum uint8, data []byte) (int, er
 	return n, nil
 }
 
-func (d *Device) getDstPrefix(dst netip.Addr) netip.Prefix {
+func (d *Device) getDstPrefix(dst netip.Addr) (netip.Prefix, bool) {
 	prefixSize := 0
 	var prefix netip.Prefix
+	found := false
 	for pre := range d.Table {
-		if pre.Contains(dst) && prefixSize < pre.Bits() {
-			prefix = pre
+		// if pre.Contains(dst) {
+		// 	fmt.Printf("%s\n", pre)
+		// }
+		if pre.Contains(dst) && prefixSize <= pre.Bits() {
+			prefix = pre.Masked()
 			prefixSize = pre.Bits()
+			found = true
 		}
 	}
-	return prefix
+	return prefix, found
 }
 
 func (d *Device) Handler(packet Packet) {
+	if !d.isMyIp(packet.Header.Dst) {
+		d.sendPacket(&packet)
+		return
+	}
+
 	protocolNum := packet.Header.Protocol
 	handler, ok := d.Handlers[uint8(protocolNum)]
 	if ok {
 		handler(&packet, nil)
 		// Drop packet is just not handling here
 	}
+}
+
+func (d *Device) isMyIp(dst netip.Addr) bool {
+	for _, inter := range d.Interfaces {
+		if inter.Ip == dst {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandler(packet *Packet, _ []interface{}) {
@@ -273,23 +315,36 @@ func RipHandler(packet *Packet, _ []interface{}) {
 	os.Stdout.Write(packet.Data)
 }
 
-// TODO see how to compute this
-func ComputeCheckSum(h *ipv4header.IPv4Header) int {
-	sum := 0
-	sum += h.Version
-	sum += h.Len
-	sum += h.TOS
-	sum += h.TotalLen
-	sum += h.ID
-	sum += int(h.Flags)
-	sum += h.FragOff
-	sum += h.TTL
-	sum += h.Protocol
-	sum += int(binary.BigEndian.Uint32(h.Src.AsSlice()))
-	sum += int(binary.BigEndian.Uint32(h.Dst.AsSlice()))
-	return sum
+// TODO come back here latter
+func (d *Device) createRipPacket(command uint16) (*ripheaders.RipHeader, error) {
+	h := new(ripheaders.RipHeader)
+	h.Command = command
+	if ripheaders.Response == ripheaders.HeaderCommand(command) {
+		h.Num_entries = uint16(len(d.Neighbours))
+		for _, inter := range d.Interfaces {
+			prefixArray := inter.Prefix.Addr().As4()
+			prefixBytes := prefixArray[0:]
+			address := binary.BigEndian.Uint32(prefixBytes)
+			// COntinue here
+			println(address)
+		}
+	} else if ripheaders.Request != ripheaders.HeaderCommand(command) {
+		return nil, ripheaders.ErrInvalidCommand
+	}
+	return nil, nil
 }
 
-func ValidateChecksum(h *ipv4header.IPv4Header) bool {
-	return ComputeCheckSum(h) == h.Checksum
+// Compute the checksum using the netstack package
+// GOT FROM UDP IN IP EXAMPLE
+func ComputeChecksum(b []byte) uint16 {
+	checksum := header.Checksum(b, 0)
+	checksumInv := checksum ^ 0xffff
+
+	return checksumInv
+}
+
+func ValidateChecksum(b []byte, fromHeader uint16) bool {
+	checksum := header.Checksum(b, fromHeader)
+
+	return fromHeader == checksum
 }

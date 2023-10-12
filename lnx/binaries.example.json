@@ -8,10 +8,10 @@
  "h3": {
   "binary_path": "./vhost"
  },
- "r1": {
-  "binary_path": "./vrouter"
+ "h4": {
+  "binary_path": "./vhost"
  },
- "r2": {
+ "r1": {
   "binary_path": "./vrouter"
  }
 }

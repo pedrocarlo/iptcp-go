@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"text/tabwriter"
 )
 
 func Repl(d *protocol.Device) {
@@ -23,6 +24,9 @@ func Repl(d *protocol.Device) {
 		}
 		if text == "ln" {
 			ListNeighbours(d)
+		}
+		if text == "lr" {
+			ListRoutes(d)
 		}
 		splitText := strings.Split(text, " ")
 
@@ -49,15 +53,15 @@ func Repl(d *protocol.Device) {
 			if err != nil {
 				println(err.Error())
 			}
-			fmt.Printf("sent %d bytes\n", n)
+			fmt.Printf("Sent %d bytes\n", n)
 		}
-
 	}
 }
 
 func ListInterfaces(d *protocol.Device) {
 	interfaces := d.Interfaces
-	fmt.Printf("Name Addr/Prefix State\n")
+	w := tabwriter.NewWriter(os.Stdout, 1, 1, 1, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(w, "Name\tAddr/Prefix\tState\t")
 	for name, inter := range interfaces {
 		state := ""
 		if inter.IsUp {
@@ -65,20 +69,36 @@ func ListInterfaces(d *protocol.Device) {
 		} else {
 			state = "down"
 		}
-		fmt.Printf("%s %s/%d %s\n", name, inter.Ip, inter.Prefix.Bits(), state)
+		fmt.Fprintf(w, "%s\t%s/%d\t%s\t\n", name, inter.Ip, inter.Prefix.Bits(), state)
 	}
+	w.Flush()
 }
 
 func ListNeighbours(d *protocol.Device) {
 	neighbours := d.Neighbours
-	fmt.Printf("Iface VIP UDPAddr\n")
+	w := tabwriter.NewWriter(os.Stdout, 1, 1, 1, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(w, "Iface\tVIP\tUDPAddr\t")
 	for _, n := range neighbours {
-		fmt.Printf("%s %s %s\n", n.InterfaceName, n.Ip.String(), n.UdpPort.String())
+		fmt.Fprintf(w, "%s\t%s\t%s\t\n", n.InterfaceName, n.Ip.String(), n.UdpPort.String())
 	}
+	w.Flush()
 }
 
 func ListRoutes(d *protocol.Device) {
-
+	w := tabwriter.NewWriter(os.Stdout, 1, 1, 1, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(w, "T\tPrefix\tNext hop\tCost\t")
+	for pre, hop := range d.Table {
+		var t string
+		if pre.Bits() == 0 {
+			t = "S"
+		} else if hop.Cost == 0 {
+			t = "L"
+		} else {
+			t = "R"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t\n", t, pre, hop.Addr, hop.Cost)
+	}
+	w.Flush()
 }
 
 func UpInterface(d *protocol.Device, name string) {
