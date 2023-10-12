@@ -228,6 +228,13 @@ func (d *Device) sendPacket(p *Packet) (int, error) {
 
 func (d *Device) SendIP(dst netip.Addr, protocolNum uint8, data []byte) (int, error) {
 	packet := d.createPacket(dst, protocolNum, data)
+	for _, iface := range d.Interfaces {
+		// Destination is to one of its interfaces
+		if iface.Ip == packet.Header.Dst {
+			d.Handler(*packet)
+			return 0, nil
+		}
+	}
 	n, err := d.sendPacket(packet)
 	if err != nil {
 		return 0, err
