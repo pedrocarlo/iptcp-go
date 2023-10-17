@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	ripheaders "iptcp-pedrocarlo/pkg/rip-headers"
 	lnxconfig "lnxconfig"
@@ -28,6 +29,10 @@ const (
 	ripResponse uint16 = 2
 )
 
+var (
+	errInterfaceDown = errors.New("interface is down")
+)
+
 // type HandlerFunc = func(*Packet, []interface{})
 // RegisterRecvHandler(protocolNum uint8, callbackFunc HandlerFunc)
 
@@ -37,9 +42,8 @@ type Packet struct {
 }
 
 type Hop struct {
-	Addr        netip.Addr
-	Cost        uint32
-	LearnedFrom netip.Addr
+	Addr netip.Addr
+	Cost uint32
 }
 
 type RoutingTable map[netip.Prefix]Hop
@@ -53,6 +57,7 @@ type Device struct {
 	IsRouter     bool
 	RoutingMode  lnxconfig.RoutingMode
 	RipNeighbors []netip.Addr
+	ripChannels  map[netip.Addr]chan bool
 	Handlers     map[uint8]HandlerFunc
 	Listeners    map[string]*net.UDPConn // string interface names
 	Mutex        *sync.Mutex
@@ -86,7 +91,7 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 		routerInter := RouteInterface{Name: interf.Name, Ip: interf.AssignedIP, Prefix: interf.AssignedPrefix, UdpPort: interf.UDPAddr, IsUp: true}
 		interMap[interf.Name] = &routerInter
 		// Populating table with interface local prefixes
-		device.Table[interf.AssignedPrefix.Masked()] = Hop{Addr: interf.AssignedIP, Cost: 0, LearnedFrom: interf.AssignedIP}
+		device.Table[interf.AssignedPrefix.Masked()] = Hop{Addr: interf.AssignedIP, Cost: 0}
 	}
 
 	neighbourSlice := make([]Neighbour, 0)
@@ -103,7 +108,7 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 	// device := Device{Table: make(RoutingTable), Interfaces: interMap, Neighbours: neighbourSlice, IsRouter: isRouter, RoutingMode: configInfo.RoutingMode, RipNeighbors: configInfo.RipNeighbors, Handlers: make(map[uint8]func(*Packet, []interface{}))}
 
 	for pre, route := range configInfo.StaticRoutes {
-		device.Table[pre] = Hop{Addr: route, Cost: 0, LearnedFrom: route}
+		device.Table[pre] = Hop{Addr: route, Cost: 0}
 	}
 
 	device.RegisterRecvHandler(testProtocol, TestHandler)
@@ -112,7 +117,7 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 	}
 
 	listeners := make(map[string]*net.UDPConn, 0)
-	listenChannels := make(map[string](chan []byte), 0)
+	listenChannels := make(map[string](chan netip.Addr), 5)
 	for _, inter := range device.Interfaces {
 		// addr := fmt.Sprintf("%s:%d", inter.UdpPort.String(), inter.UdpPort.Port())
 		addr := net.UDPAddr{
@@ -123,25 +128,26 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 		if err != nil {
 			return nil, err
 		}
-		channel := make(chan []byte)
+		channel := make(chan netip.Addr)
 		listenChannels[inter.Name] = channel
 		listeners[inter.Name] = ln
-		go device.Listen(ln, channel)
+		go device.Listen(ln, inter)
 	}
 	device.Listeners = listeners
 
 	// ripRequest to routers
-
+	device.ripChannels = make(map[netip.Addr]chan bool)
 	if isRouter {
-		device.Mutex.Lock()
 		ripNei := make([]netip.Addr, len(device.RipNeighbors))
 		copy(ripNei, device.RipNeighbors)
-		device.Mutex.Unlock()
 		for _, router := range ripNei {
 			err := device.sendRip(ripRequest, router)
 			if err != nil {
 				continue
 			}
+			device.ripChannels[router] = make(chan bool, 5)
+			channel := device.ripChannels[router]
+			go device.timeout(channel, router)
 		}
 		go device.Rip()
 	}
@@ -150,9 +156,13 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 }
 
 // Probably communicate via channels
-func (d *Device) Listen(conn net.Conn, receivedChan chan []byte) error {
+func (d *Device) Listen(conn net.Conn, inter *RouteInterface) error {
 	size := MaxMessageSize
 	for {
+		if !inter.IsUp {
+			// Do not listen if interface down
+			continue
+		}
 		// TODO ask about timeouts in GOlang professor
 		buf := make([]byte, size)
 		_, err := conn.Read(buf)
@@ -168,7 +178,7 @@ func (d *Device) Listen(conn net.Conn, receivedChan chan []byte) error {
 		}
 
 		data := buf[header.Len:header.TotalLen]
-
+		go d.timeoutHandler(header.Src)
 		go d.Handler(Packet{Header: *header, Data: data})
 	}
 }
@@ -214,9 +224,7 @@ func (d *Device) findIp(dst netip.Addr) (*netip.AddrPort, string, error) {
 
 	var udpAddr netip.AddrPort
 	var iface string
-	d.Mutex.Lock()
 	hop := d.Table[prefix]
-	d.Mutex.Unlock()
 
 	var next netip.Addr
 	if prefix.Bits() == 0 || hop.Cost > 0 {
@@ -247,8 +255,14 @@ func (d *Device) sendPacket(p *Packet) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	if !d.Interfaces[iface].IsUp {
+		return 0, errInterfaceDown
+	}
+
 	// Change src addr to be correct interface
 	p.Header.Src = d.Interfaces[iface].Ip
+
 	conn := d.Listeners[iface]
 	if err != nil {
 		return 0, err
@@ -285,7 +299,6 @@ func (d *Device) getDstPrefix(dst netip.Addr) (netip.Prefix, bool) {
 	prefixSize := 0
 	var prefix netip.Prefix
 	found := false
-	d.Mutex.Lock()
 	for pre := range d.Table {
 		// if pre.Contains(dst) {
 		// 	fmt.Printf("%s\n", pre)
@@ -296,7 +309,6 @@ func (d *Device) getDstPrefix(dst netip.Addr) (netip.Prefix, bool) {
 			found = true
 		}
 	}
-	d.Mutex.Unlock()
 	return prefix, found
 }
 
@@ -306,10 +318,13 @@ func (d *Device) Handler(packet Packet) {
 		return
 	}
 
+	d.timeoutHandler(packet.Header.Src)
 	protocolNum := packet.Header.Protocol
 	handler, ok := d.Handlers[uint8(protocolNum)]
 	if ok {
+		d.Mutex.Lock()
 		handler(d, &packet, nil)
+		d.Mutex.Unlock()
 		// Drop packet is just not handling here
 	}
 }
@@ -328,7 +343,6 @@ func TestHandler(d *Device, packet *Packet, _ []interface{}) {
 	fmt.Printf("> Received test packet: Src: %s, Dst: %s, TTL: %d, Data: %s\n> ", packet.Header.Src, packet.Header.Dst, packet.Header.TTL, packet.Data)
 }
 
-// TODO Implement RIP
 // Why do we need request?
 // To know the router is online?
 func RipHandler(d *Device, packet *Packet, _ []interface{}) {
@@ -354,9 +368,7 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 			bitsMask := ripheaders.Mask2Bits(host.Mask)
 			prefix := netip.PrefixFrom(addr, int(bitsMask))
 
-			d.Mutex.Lock()
 			currHop, ok := d.Table[prefix]
-			d.Mutex.Unlock()
 			cost := host.Cost
 			if cost > ripheaders.INFINITY {
 				cost = ripheaders.INFINITY
@@ -367,15 +379,11 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 			if !ok {
 				// println(cost)
 				// Does not exist in table add to table
-				d.Mutex.Lock()
-				d.Table[prefix] = Hop{Addr: addr, Cost: cost, LearnedFrom: packet.Header.Src}
-				d.Mutex.Unlock()
+				d.Table[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
 			} else {
 				// Maybe this is enough
 				if cost < currHop.Cost {
-					d.Mutex.Lock()
-					d.Table[prefix] = Hop{Addr: addr, Cost: cost, LearnedFrom: packet.Header.Src}
-					d.Mutex.Unlock()
+					d.Table[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
 				}
 			}
 		}
@@ -389,23 +397,16 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 			}
 		}
 		if !found {
-			d.Mutex.Lock()
 			d.RipNeighbors = append(d.RipNeighbors, packet.Header.Src)
-			d.Mutex.Unlock()
+			d.ripChannels[packet.Header.Src] = make(chan bool, 5)
 		}
 	}
 }
 
-func timeout() {
-	
-}
-
-// CHECK WHY THERE ARE MANY ENTRIES IN THE TABLE
 func (d *Device) CreateRipPacket(command uint16, dst netip.Addr) (*ripheaders.RipHeader, error) {
 	h := new(ripheaders.RipHeader)
 	h.Command = command
 	if ripheaders.Response == ripheaders.HeaderCommand(command) {
-		d.Mutex.Lock()
 		for prefix, hop := range d.Table {
 			// Assuming here routers do not have 0.0.0.0 default addr
 			prefixArray := prefix.Addr().As4()
@@ -413,19 +414,14 @@ func (d *Device) CreateRipPacket(command uint16, dst netip.Addr) (*ripheaders.Ri
 			address := binary.BigEndian.Uint32(prefixBytes)
 			cost := hop.Cost
 			// Split Horizon with Poisoned Reverse
-			if hop.LearnedFrom == dst {
+			if hop.Addr == dst {
 				cost = ripheaders.INFINITY
 			}
 
 			mask := ripheaders.Bits2Mask(uint32(prefix.Bits()))
 			h.Hosts = append(h.Hosts, ripheaders.Route{Cost: cost, Address: address, Mask: mask})
-			// fmt.Printf("LEARNED FROM: %s, DST: %s\n", hop.LearnedFrom, dst)
-
-			// test := netip.PrefixFrom(netip.AddrFrom4(prefixArray), prefix.Bits())
-			// fmt.Printf("COST: %d, ADDR: %s\n", cost, test)
 			h.Num_entries = uint16(len(h.Hosts))
 		}
-		d.Mutex.Unlock()
 	} else if ripheaders.Request != ripheaders.HeaderCommand(command) {
 		return nil, ripheaders.ErrInvalidCommand
 	}
@@ -434,22 +430,18 @@ func (d *Device) CreateRipPacket(command uint16, dst netip.Addr) (*ripheaders.Ri
 
 // TODO implement triggered updates somewhere
 func (d *Device) Rip() {
-	// Initial Setup to request to peers
-	// Todo check when should request be made. Just on initialize?
-	// Response is maybe done earlier in initialize
 	for {
-		// ripNei := make([]netip.Addr, len(d.RipNeighbors))
-		// copy(ripNei, d.RipNeighbors)
+		d.Mutex.Lock()
 		for _, router := range d.RipNeighbors {
 			err := d.sendRip(ripResponse, router)
 			if err != nil {
 				continue
 			}
 		}
+		d.Mutex.Unlock()
 		timer := time.NewTimer(5 * time.Second)
 		<-timer.C
 	}
-
 }
 
 func (d *Device) sendRip(command uint16, router netip.Addr) error {
@@ -471,7 +463,49 @@ func (d *Device) sendRip(command uint16, router netip.Addr) error {
 	return nil
 }
 
+func (d *Device) timeoutHandler(ip netip.Addr) {
+	d.Mutex.Lock()
+	channel, ok := d.ripChannels[ip]
+	d.Mutex.Unlock()
+	if ok {
+		channel <- true
+	}
+}
 
+// Buffered received Channel
+func (d *Device) timeout(received chan bool, ip netip.Addr) {
+	for {
+		select {
+		case <-received:
+			continue
+		case <-time.NewTimer(12 * time.Second).C:
+			// Timeout conn
+			// TODO For now delete from ripneighbour
+			var index int
+			var found bool = false
+			d.Mutex.Lock()
+			for i, addr := range d.RipNeighbors {
+				if addr == ip {
+					index = i
+					found = true
+					break
+				}
+			}
+			if found {
+				d.RipNeighbors = remove(d.RipNeighbors, index)
+				close(d.ripChannels[ip])
+				delete(d.ripChannels, ip)
+			}
+			d.Mutex.Unlock()
+			return
+		}
+	}
+}
+
+func remove(s []netip.Addr, i int) []netip.Addr {
+	s[i] = s[len(s)-1]
+	return s[:len(s)-1]
+}
 
 // Compute the checksum using the netstack package
 // GOT FROM UDP IN IP EXAMPLE
@@ -488,12 +522,9 @@ func ValidateChecksum(b []byte, fromHeader uint16) bool {
 	return fromHeader == checksum
 }
 
-
-
 func ListRoutes(d *Device) {
 	w := tabwriter.NewWriter(os.Stdout, 1, 1, 1, ' ', tabwriter.AlignRight)
 	fmt.Fprintln(w, "T\tPrefix\tNext hop\tCost\t")
-	d.Mutex.Lock()
 	for pre, hop := range d.Table {
 		var t string
 		if pre.Bits() == 0 {
@@ -505,6 +536,5 @@ func ListRoutes(d *Device) {
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t\n", t, pre, hop.Addr, hop.Cost)
 	}
-	d.Mutex.Unlock()
 	w.Flush()
 }
