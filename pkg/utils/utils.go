@@ -55,6 +55,17 @@ func Repl(d *protocol.Device) {
 			}
 			fmt.Printf("Sent %d bytes\n", n)
 		}
+		if splitText[0] == "rip" {
+			if len(splitText) < 2 {
+				println("Should pass more arguments for command")
+				continue
+			}
+			n, err := SendTestRip(d, splitText[1])
+			if err != nil {
+				println(err.Error())
+			}
+			fmt.Printf("Sent %d bytes\n", n)
+		}
 	}
 }
 
@@ -87,17 +98,27 @@ func ListNeighbours(d *protocol.Device) {
 func ListRoutes(d *protocol.Device) {
 	w := tabwriter.NewWriter(os.Stdout, 1, 1, 1, ' ', tabwriter.AlignRight)
 	fmt.Fprintln(w, "T\tPrefix\tNext hop\tCost\t")
+	// Mutex here stuff
+	d.Mutex.Lock()
 	for pre, hop := range d.Table {
 		var t string
+		addr := hop.Addr.String()
 		if pre.Bits() == 0 {
 			t = "S"
 		} else if hop.Cost == 0 {
 			t = "L"
+			addr = "LOCAL:"
+			for iface, inter := range d.Interfaces {
+				if inter.Prefix == pre {
+					addr += iface
+				}
+			}
 		} else {
 			t = "R"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t\n", t, pre, hop.Addr, hop.Cost)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t\n", t, pre, addr, hop.Cost)
 	}
+	d.Mutex.Unlock()
 	w.Flush()
 }
 
@@ -115,5 +136,23 @@ func SendMessage(d *protocol.Device, addr string, msg string) (int, error) {
 		return 0, err
 	}
 	n, err := d.SendIP(addrIp, 0, []byte(msg))
+	return n, err
+}
+
+func SendTestRip(d *protocol.Device, addr string) (int, error) {
+	addrIp, err := netip.ParseAddr(addr)
+	if err != nil {
+		return 0, err
+	}
+	h, err := d.CreateRipPacket(2, addrIp)
+	if err != nil {
+		return 0, err
+	}
+	h.PrintHeader()
+	marshal, err := h.Marshal()
+	if err != nil {
+		return 0, err
+	}
+	n, err := d.SendIP(addrIp, 200, marshal)
 	return n, err
 }

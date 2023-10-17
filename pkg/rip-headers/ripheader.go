@@ -3,6 +3,9 @@ package ripheaders
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"math/bits"
+	"net/netip"
 )
 
 var (
@@ -52,17 +55,25 @@ func (h *RipHeader) Marshal() ([]byte, error) {
 	if h.Num_entries > maxEntrySize {
 		return nil, errEntriesTooLong
 	}
-	b1 := make([]byte, commandEntrySize)
-	binary.BigEndian.PutUint16(b1[:2], h.Command)
-	binary.BigEndian.PutUint16(b1[2:4], h.Num_entries)
+	b1 := make([]byte, 0)
+	b1 = binary.BigEndian.AppendUint16(b1, h.Command)
+	b1 = binary.BigEndian.AppendUint16(b1, h.Num_entries)
 
-	for i := 0; i < int(h.Num_entries); i++ {
-		tmp := make([]byte, hostLen)
+	// binary.BigEndian.PutUint16(b1[:2], h.Command)
+	// binary.BigEndian.PutUint16(b1[2:4], h.Num_entries)
+
+	for i := 0; i < len(h.Hosts); i++ {
+		// tmp := make([]byte, hostLen)
 		host := h.Hosts[i]
-		binary.BigEndian.PutUint32(tmp[:4], host.Cost)
-		binary.BigEndian.PutUint32(tmp[4:8], host.Address)
-		binary.BigEndian.PutUint32(tmp[8:12], host.Mask)
-		b1 = append(b1, tmp...)
+		b1 = binary.BigEndian.AppendUint32(b1, host.Cost)
+		b1 = binary.BigEndian.AppendUint32(b1, host.Address)
+		b1 = binary.BigEndian.AppendUint32(b1, host.Mask)
+
+		// binary.BigEndian.PutUint32(tmp[:4], host.Cost)
+		// binary.BigEndian.PutUint32(tmp[4:8], host.Address)
+		// mask := ^uint32(0) << (32 - host.Mask)
+		// binary.BigEndian.PutUint32(tmp[8:12], host.Mask)
+		// b1 = append(b1, tmp...)
 	}
 	return b1, nil
 }
@@ -83,13 +94,23 @@ func (h *RipHeader) Parse(b []byte) error {
 		return errEntriesRequest
 	}
 
+	zero_index := 4
 	for i := 0; i < int(h.Num_entries); i++ {
-		start := 4 * i
+		start := zero_index + 12*i
 		cost := binary.BigEndian.Uint32(b[start : start+4])
-		address := binary.BigEndian.Uint32(b[start+8 : start+12])
-		mask := binary.BigEndian.Uint32(b[start+12 : start+16])
+		address := binary.BigEndian.Uint32(b[start+4 : start+8])
+		mask := binary.BigEndian.Uint32(b[start+8 : start+12])
 		host := Route{Cost: cost, Address: address, Mask: mask}
 		h.Hosts = append(h.Hosts, host)
+
+		// addrBuf := make([]byte, 4)
+		// binary.BigEndian.PutUint32(addrBuf, host.Address)
+		// addr, ok := netip.AddrFromSlice(addrBuf)
+		// if !ok {
+		// 	println("could not get ip in rip handler")
+		// }
+		// test := netip.PrefixFrom(addr, int(Mask2Bits(mask)))
+		// fmt.Printf("Cost: %d, address: %s\n", cost, test)
 	}
 
 	if h.Num_entries > maxEntrySize || len(h.Hosts) > maxEntrySize {
@@ -104,4 +125,28 @@ func ParseHeader(b []byte) (*RipHeader, error) {
 		return nil, err
 	}
 	return h, nil
+}
+
+func Mask2Bits(mask uint32) uint32 {
+	// Bitwise and with mask
+	return uint32(bits.OnesCount32(mask))
+}
+
+func Bits2Mask(bits uint32) uint32 {
+	return ^uint32(0) << (32 - bits)
+}
+
+func (h *RipHeader) PrintHeader() {
+	println()
+	fmt.Printf("COMMAND: %d NUM ENTRIES: %d\n", h.Command, h.Num_entries)
+	for _, host := range h.Hosts {
+		addrBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(addrBuf, host.Address)
+		addr, ok := netip.AddrFromSlice(addrBuf)
+		if !ok {
+			println("could not get ip in rip handler")
+		}
+		test := netip.PrefixFrom(addr, int(Mask2Bits(host.Mask)))
+		fmt.Printf("COST: %d, ADDR: %s\n", host.Cost, test)
+	}
 }
