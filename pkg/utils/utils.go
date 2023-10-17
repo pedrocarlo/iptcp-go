@@ -123,6 +123,17 @@ func ListRoutes(d *protocol.Device) {
 }
 
 func UpInterface(d *protocol.Device, name string) {
+	if !d.Interfaces[name].IsUp {
+		// send rip package to all reouters
+		d.Mutex.Lock()
+		for _, router := range d.RipNeighbors {
+			err := d.SendRip(protocol.RipResponse, router)
+			if err != nil {
+				continue
+			}
+		}
+		d.Mutex.Unlock()
+	}
 	d.Interfaces[name].IsUp = true
 }
 

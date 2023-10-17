@@ -26,7 +26,7 @@ const (
 
 const (
 	ripRequest  uint16 = 1
-	ripResponse uint16 = 2
+	RipResponse uint16 = 2
 )
 
 var (
@@ -141,7 +141,7 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 		ripNei := make([]netip.Addr, len(device.RipNeighbors))
 		copy(ripNei, device.RipNeighbors)
 		for _, router := range ripNei {
-			err := device.sendRip(ripRequest, router)
+			err := device.SendRip(ripRequest, router)
 			if err != nil {
 				continue
 			}
@@ -350,7 +350,7 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 	if err != nil {
 		return
 	}
-	if ripHeader.Command == ripResponse {
+	if ripHeader.Command == RipResponse {
 		for _, host := range ripHeader.Hosts {
 			addrBuf := make([]byte, 4)
 			binary.BigEndian.PutUint32(addrBuf, host.Address)
@@ -399,6 +399,7 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 		if !found {
 			d.RipNeighbors = append(d.RipNeighbors, packet.Header.Src)
 			d.ripChannels[packet.Header.Src] = make(chan bool, 5)
+			go d.timeout(d.ripChannels[packet.Header.Src], packet.Header.Src)
 		}
 	}
 }
@@ -433,7 +434,7 @@ func (d *Device) Rip() {
 	for {
 		d.Mutex.Lock()
 		for _, router := range d.RipNeighbors {
-			err := d.sendRip(ripResponse, router)
+			err := d.SendRip(RipResponse, router)
 			if err != nil {
 				continue
 			}
@@ -444,7 +445,7 @@ func (d *Device) Rip() {
 	}
 }
 
-func (d *Device) sendRip(command uint16, router netip.Addr) error {
+func (d *Device) SendRip(command uint16, router netip.Addr) error {
 	h, err := d.CreateRipPacket(command, router)
 	if err != nil {
 		// Put logger error here
@@ -492,9 +493,20 @@ func (d *Device) timeout(received chan bool, ip netip.Addr) {
 				}
 			}
 			if found {
+				// purge entries it learned from that router
 				d.RipNeighbors = remove(d.RipNeighbors, index)
 				close(d.ripChannels[ip])
 				delete(d.ripChannels, ip)
+
+				pre2Delete := make([]netip.Prefix, 0)
+				for prefix, hop := range d.Table {
+					if hop.Addr == ip {
+						pre2Delete = append(pre2Delete, prefix)
+					}
+				}
+				for _, pre := range pre2Delete {
+					delete(d.Table, pre)
+				}
 			}
 			d.Mutex.Unlock()
 			return
