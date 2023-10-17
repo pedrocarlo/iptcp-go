@@ -86,7 +86,7 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 		routerInter := RouteInterface{Name: interf.Name, Ip: interf.AssignedIP, Prefix: interf.AssignedPrefix, UdpPort: interf.UDPAddr, IsUp: true}
 		interMap[interf.Name] = &routerInter
 		// Populating table with interface local prefixes
-		device.Table[interf.AssignedPrefix.Masked()] = Hop{Addr: interf.AssignedIP, Cost: 0, LearnedFrom: interf.AssignedPrefix.Addr()}
+		device.Table[interf.AssignedPrefix.Masked()] = Hop{Addr: interf.AssignedIP, Cost: 0, LearnedFrom: interf.AssignedIP}
 	}
 
 	neighbourSlice := make([]Neighbour, 0)
@@ -358,13 +358,14 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 			currHop, ok := d.Table[prefix]
 			d.Mutex.Unlock()
 			cost := host.Cost
+			if cost > ripheaders.INFINITY {
+				cost = ripheaders.INFINITY
+			} else if cost < ripheaders.INFINITY {
+				cost = cost + 1
+			}
+			// println(packet.Header.Src.String())
 			if !ok {
-				if cost > ripheaders.INFINITY {
-					cost = ripheaders.INFINITY
-				} else if cost < ripheaders.INFINITY {
-					cost = cost + 1
-				}
-				println(cost)
+				// println(cost)
 				// Does not exist in table add to table
 				d.Mutex.Lock()
 				d.Table[prefix] = Hop{Addr: addr, Cost: cost, LearnedFrom: packet.Header.Src}
@@ -395,6 +396,10 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 	}
 }
 
+func timeout() {
+	
+}
+
 // CHECK WHY THERE ARE MANY ENTRIES IN THE TABLE
 func (d *Device) CreateRipPacket(command uint16, dst netip.Addr) (*ripheaders.RipHeader, error) {
 	h := new(ripheaders.RipHeader)
@@ -407,12 +412,15 @@ func (d *Device) CreateRipPacket(command uint16, dst netip.Addr) (*ripheaders.Ri
 			prefixBytes := prefixArray[0:]
 			address := binary.BigEndian.Uint32(prefixBytes)
 			cost := hop.Cost
-			mask := ripheaders.Bits2Mask(uint32(prefix.Bits()))
-			h.Hosts = append(h.Hosts, ripheaders.Route{Cost: cost, Address: address, Mask: mask})
 			// Split Horizon with Poisoned Reverse
 			if hop.LearnedFrom == dst {
 				cost = ripheaders.INFINITY
 			}
+
+			mask := ripheaders.Bits2Mask(uint32(prefix.Bits()))
+			h.Hosts = append(h.Hosts, ripheaders.Route{Cost: cost, Address: address, Mask: mask})
+			// fmt.Printf("LEARNED FROM: %s, DST: %s\n", hop.LearnedFrom, dst)
+
 			// test := netip.PrefixFrom(netip.AddrFrom4(prefixArray), prefix.Bits())
 			// fmt.Printf("COST: %d, ADDR: %s\n", cost, test)
 			h.Num_entries = uint16(len(h.Hosts))
@@ -463,6 +471,8 @@ func (d *Device) sendRip(command uint16, router netip.Addr) error {
 	return nil
 }
 
+
+
 // Compute the checksum using the netstack package
 // GOT FROM UDP IN IP EXAMPLE
 func ComputeChecksum(b []byte) uint16 {
@@ -477,6 +487,8 @@ func ValidateChecksum(b []byte, fromHeader uint16) bool {
 
 	return fromHeader == checksum
 }
+
+
 
 func ListRoutes(d *Device) {
 	w := tabwriter.NewWriter(os.Stdout, 1, 1, 1, ' ', tabwriter.AlignRight)
