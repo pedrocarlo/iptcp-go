@@ -122,18 +122,8 @@ func ListRoutes(d *protocol.Device) {
 	w.Flush()
 }
 
+// TODO have error handling here
 func UpInterface(d *protocol.Device, name string) {
-	if !d.Interfaces[name].IsUp {
-		// send rip package to all reouters
-		d.Mutex.Lock()
-		for _, router := range d.RipNeighbors {
-			err := d.SendRip(protocol.RipResponse, router)
-			if err != nil {
-				continue
-			}
-		}
-		d.Mutex.Unlock()
-	}
 	d.Interfaces[name].IsUp = true
 }
 
@@ -155,7 +145,7 @@ func SendTestRip(d *protocol.Device, addr string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	h, err := d.CreateRipPacket(2, addrIp)
+	h, err := d.CreateRipPacket(2, addrIp, d.Table)
 	if err != nil {
 		return 0, err
 	}

@@ -141,7 +141,7 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 		ripNei := make([]netip.Addr, len(device.RipNeighbors))
 		copy(ripNei, device.RipNeighbors)
 		for _, router := range ripNei {
-			err := device.SendRip(ripRequest, router)
+			err := device.SendRip(ripRequest, router, device.Table)
 			if err != nil {
 				continue
 			}
@@ -351,6 +351,7 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 		return
 	}
 	if ripHeader.Command == RipResponse {
+		triggered := make(RoutingTable)
 		for _, host := range ripHeader.Hosts {
 			addrBuf := make([]byte, 4)
 			binary.BigEndian.PutUint32(addrBuf, host.Address)
@@ -363,7 +364,6 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 				println("ip not valid")
 				return
 			}
-
 			// translate back the correct bit amount
 			bitsMask := ripheaders.Mask2Bits(host.Mask)
 			prefix := netip.PrefixFrom(addr, int(bitsMask))
@@ -375,15 +375,23 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 			} else if cost < ripheaders.INFINITY {
 				cost = cost + 1
 			}
-			// println(packet.Header.Src.String())
 			if !ok {
-				// println(cost)
 				// Does not exist in table add to table
 				d.Table[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+				// TRIGGER UPDATE HERE
+				triggered[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
 			} else {
 				// Maybe this is enough
 				if cost < currHop.Cost {
 					d.Table[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+				}
+			}
+		}
+		if len(triggered) > 0 {
+			for _, router := range d.RipNeighbors {
+				err := d.SendRip(RipResponse, router, triggered)
+				if err != nil {
+					continue
 				}
 			}
 		}
@@ -404,11 +412,11 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 	}
 }
 
-func (d *Device) CreateRipPacket(command uint16, dst netip.Addr) (*ripheaders.RipHeader, error) {
+func (d *Device) CreateRipPacket(command uint16, dst netip.Addr, table RoutingTable) (*ripheaders.RipHeader, error) {
 	h := new(ripheaders.RipHeader)
 	h.Command = command
 	if ripheaders.Response == ripheaders.HeaderCommand(command) {
-		for prefix, hop := range d.Table {
+		for prefix, hop := range table {
 			// Assuming here routers do not have 0.0.0.0 default addr
 			prefixArray := prefix.Addr().As4()
 			prefixBytes := prefixArray[0:]
@@ -434,7 +442,7 @@ func (d *Device) Rip() {
 	for {
 		d.Mutex.Lock()
 		for _, router := range d.RipNeighbors {
-			err := d.SendRip(RipResponse, router)
+			err := d.SendRip(RipResponse, router, d.Table)
 			if err != nil {
 				continue
 			}
@@ -445,8 +453,8 @@ func (d *Device) Rip() {
 	}
 }
 
-func (d *Device) SendRip(command uint16, router netip.Addr) error {
-	h, err := d.CreateRipPacket(command, router)
+func (d *Device) SendRip(command uint16, router netip.Addr, table RoutingTable) error {
+	h, err := d.CreateRipPacket(command, router, table)
 	if err != nil {
 		// Put logger error here
 		return err
@@ -480,8 +488,7 @@ func (d *Device) timeout(received chan bool, ip netip.Addr) {
 		case <-received:
 			continue
 		case <-time.NewTimer(12 * time.Second).C:
-			// Timeout conn
-			// TODO For now delete from ripneighbour
+			// Timeout RIP NEIGHBOUR
 			var index int
 			var found bool = false
 			d.Mutex.Lock()
