@@ -33,9 +33,6 @@ var (
 	errInterfaceDown = errors.New("interface is down")
 )
 
-// type HandlerFunc = func(*Packet, []interface{})
-// RegisterRecvHandler(protocolNum uint8, callbackFunc HandlerFunc)
-
 type Packet struct {
 	Header ipv4header.IPv4Header
 	Data   []byte
@@ -105,7 +102,6 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 	device.IsRouter = isRouter
 	device.RoutingMode = configInfo.RoutingMode
 	device.RipNeighbors = configInfo.RipNeighbors
-	// device := Device{Table: make(RoutingTable), Interfaces: interMap, Neighbours: neighbourSlice, IsRouter: isRouter, RoutingMode: configInfo.RoutingMode, RipNeighbors: configInfo.RipNeighbors, Handlers: make(map[uint8]func(*Packet, []interface{}))}
 
 	for pre, route := range configInfo.StaticRoutes {
 		device.Table[pre] = Hop{Addr: route, Cost: 0}
@@ -117,9 +113,8 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 	}
 
 	listeners := make(map[string]*net.UDPConn, 0)
-	listenChannels := make(map[string](chan netip.Addr), 5)
+	// listenChannels := make(map[string](chan netip.Addr), 5)
 	for _, inter := range device.Interfaces {
-		// addr := fmt.Sprintf("%s:%d", inter.UdpPort.String(), inter.UdpPort.Port())
 		addr := net.UDPAddr{
 			Port: int(inter.UdpPort.Port()),
 			IP:   inter.UdpPort.Addr().AsSlice(),
@@ -128,8 +123,8 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 		if err != nil {
 			return nil, err
 		}
-		channel := make(chan netip.Addr)
-		listenChannels[inter.Name] = channel
+		// channel := make(chan netip.Addr)
+		// listenChannels[inter.Name] = channel
 		listeners[inter.Name] = ln
 		go device.Listen(ln, inter)
 	}
@@ -163,14 +158,12 @@ func (d *Device) Listen(conn net.Conn, inter *RouteInterface) error {
 			// Do not listen if interface down
 			continue
 		}
-		// TODO ask about timeouts in GOlang professor
 		buf := make([]byte, size)
 		_, err := conn.Read(buf)
 		if err != nil {
 			// Drop Packets
 			continue
 		}
-		// See timeout break here
 		header, err := ipv4header.ParseHeader(buf)
 		if err != nil {
 			// Drop packet
@@ -214,7 +207,6 @@ func (d *Device) createPacket(dst netip.Addr, protocolNum uint8, data []byte) *P
 	return &Packet{Header: h, Data: data}
 }
 
-// TODO see if different interfaces interfere in this search for ip
 func (d *Device) findIp(dst netip.Addr) (*netip.AddrPort, string, error) {
 	prefix, ok := d.getDstPrefix(dst)
 
@@ -232,7 +224,6 @@ func (d *Device) findIp(dst netip.Addr) (*netip.AddrPort, string, error) {
 	} else {
 		next = dst
 	}
-	// fmt.Printf("%s\n", next)
 
 	for _, neighbour := range d.Neighbours {
 		if neighbour.Ip == next {
@@ -300,9 +291,6 @@ func (d *Device) getDstPrefix(dst netip.Addr) (netip.Prefix, bool) {
 	var prefix netip.Prefix
 	found := false
 	for pre := range d.Table {
-		// if pre.Contains(dst) {
-		// 	fmt.Printf("%s\n", pre)
-		// }
 		if pre.Contains(dst) && prefixSize <= pre.Bits() {
 			prefix = pre.Masked()
 			prefixSize = pre.Bits()
@@ -343,15 +331,16 @@ func TestHandler(d *Device, packet *Packet, _ []interface{}) {
 	fmt.Printf("> Received test packet: Src: %s, Dst: %s, TTL: %d, Data: %s\n> ", packet.Header.Src, packet.Header.Dst, packet.Header.TTL, packet.Data)
 }
 
-// Why do we need request?
-// To know the router is online?
+// TODO MAKE IT UNIFORM TO TRIGGER UPDATE
 func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 	ripHeader, err := ripheaders.ParseHeader(packet.Data)
 	if err != nil {
 		return
 	}
+	d.addNeighboursIfStale(packet)
+
+	triggered := make(RoutingTable)
 	if ripHeader.Command == RipResponse {
-		triggered := make(RoutingTable)
 		for _, host := range ripHeader.Hosts {
 			addrBuf := make([]byte, 4)
 			binary.BigEndian.PutUint32(addrBuf, host.Address)
@@ -375,40 +364,44 @@ func RipHandler(d *Device, packet *Packet, _ []interface{}) {
 			} else if cost < ripheaders.INFINITY {
 				cost = cost + 1
 			}
+			// TODO see how to tell a far away router a router has disconnected
 			if !ok {
 				// Does not exist in table add to table
-				d.Table[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
-				// TRIGGER UPDATE HERE
-				triggered[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
-			} else {
-				// Maybe this is enough
-				if cost < currHop.Cost {
+				if cost < ripheaders.INFINITY {
 					d.Table[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+					triggered[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+				}
+			} else {
+				if cost < ripheaders.INFINITY {
+					// If smaller cost or from same router at higher cost
+					if cost < currHop.Cost {
+						d.Table[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+						triggered[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+					} else if cost > currHop.Cost && currHop.Addr == packet.Header.Src {
+						// Cost got higher from that particular hop
+						d.Table[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+						triggered[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+					}
+				} else {
+
+					// Purge routes with more than = INFINITY that are not local to me and come from who I learned from
+					if currHop.Cost > 0 && currHop.Addr == packet.Header.Src {
+						delete(d.Table, prefix)
+						triggered[prefix] = Hop{Addr: packet.Header.Src, Cost: cost}
+					}
 				}
 			}
 		}
-		if len(triggered) > 0 {
-			for _, router := range d.RipNeighbors {
-				err := d.SendRip(RipResponse, router, triggered)
-				if err != nil {
-					continue
-				}
+		for _, router := range d.RipNeighbors {
+			err := d.SendRip(RipResponse, router, triggered)
+			if err != nil {
+				continue
 			}
 		}
+
 	} else if ripHeader.Command == ripRequest {
-		// TODO Add to ripneighbour list if not there already??? Maybe
-		found := false
-		for _, rip := range d.RipNeighbors {
-			if rip == packet.Header.Src {
-				found = true
-				break
-			}
-		}
-		if !found {
-			d.RipNeighbors = append(d.RipNeighbors, packet.Header.Src)
-			d.ripChannels[packet.Header.Src] = make(chan bool, 5)
-			go d.timeout(d.ripChannels[packet.Header.Src], packet.Header.Src)
-		}
+		// Send info to requesting router
+		d.SendRip(RipResponse, packet.Header.Src, d.Table)
 	}
 }
 
@@ -437,7 +430,6 @@ func (d *Device) CreateRipPacket(command uint16, dst netip.Addr, table RoutingTa
 	return h, nil
 }
 
-// TODO implement triggered updates somewhere
 func (d *Device) Rip() {
 	for {
 		d.Mutex.Lock()
@@ -454,6 +446,9 @@ func (d *Device) Rip() {
 }
 
 func (d *Device) SendRip(command uint16, router netip.Addr, table RoutingTable) error {
+	if len(table) == 0 {
+		return nil
+	}
 	h, err := d.CreateRipPacket(command, router, table)
 	if err != nil {
 		// Put logger error here
@@ -505,14 +500,22 @@ func (d *Device) timeout(received chan bool, ip netip.Addr) {
 				close(d.ripChannels[ip])
 				delete(d.ripChannels, ip)
 
+				tmp := make(RoutingTable, 0)
 				pre2Delete := make([]netip.Prefix, 0)
 				for prefix, hop := range d.Table {
 					if hop.Addr == ip {
 						pre2Delete = append(pre2Delete, prefix)
+						tmp[prefix] = Hop{hop.Addr, ripheaders.INFINITY}
+					} else {
+						tmp[prefix] = Hop{hop.Addr, hop.Cost}
 					}
 				}
+				// Tell neighbours unreachable routes
 				for _, pre := range pre2Delete {
 					delete(d.Table, pre)
+				}
+				for _, nei := range d.RipNeighbors {
+					d.SendRip(RipResponse, nei, tmp)
 				}
 			}
 			d.Mutex.Unlock()
@@ -524,6 +527,22 @@ func (d *Device) timeout(received chan bool, ip netip.Addr) {
 func remove(s []netip.Addr, i int) []netip.Addr {
 	s[i] = s[len(s)-1]
 	return s[:len(s)-1]
+}
+
+func (d *Device) addNeighboursIfStale(packet *Packet) {
+	// If not already in the list because it became stale add it
+	found := false
+	for _, rip := range d.RipNeighbors {
+		if rip == packet.Header.Src {
+			found = true
+			break
+		}
+	}
+	if !found {
+		d.RipNeighbors = append(d.RipNeighbors, packet.Header.Src)
+		d.ripChannels[packet.Header.Src] = make(chan bool, 5)
+		go d.timeout(d.ripChannels[packet.Header.Src], packet.Header.Src)
+	}
 }
 
 // Compute the checksum using the netstack package

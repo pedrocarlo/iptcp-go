@@ -46,7 +46,7 @@ func Repl(d *protocol.Device) {
 		}
 		if splitText[0] == "send" {
 			if len(splitText) < 3 {
-				println("Should pass more arguments for command")
+				println("send <addr> <message>")
 				continue
 			}
 			n, err := SendMessage(d, splitText[1], strings.Join(splitText[2:], " "))
@@ -124,11 +124,15 @@ func ListRoutes(d *protocol.Device) {
 
 // TODO have error handling here
 func UpInterface(d *protocol.Device, name string) {
+	d.Mutex.Lock()
 	d.Interfaces[name].IsUp = true
+	d.Mutex.Unlock()
 }
 
 func DownInterface(d *protocol.Device, name string) {
+	d.Mutex.Lock()
 	d.Interfaces[name].IsUp = false
+	d.Mutex.Unlock()
 }
 
 func SendMessage(d *protocol.Device, addr string, msg string) (int, error) {
