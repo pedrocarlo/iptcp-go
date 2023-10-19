@@ -242,6 +242,7 @@ func (d *Device) findIp(dst netip.Addr) (*netip.AddrPort, string, error) {
 }
 
 func (d *Device) sendPacket(p *Packet) (int, error) {
+
 	udpAddr, iface, err := d.findIp(p.Header.Dst)
 	if err != nil {
 		return 0, err
@@ -301,6 +302,16 @@ func (d *Device) getDstPrefix(dst netip.Addr) (netip.Prefix, bool) {
 }
 
 func (d *Device) Handler(packet Packet) {
+
+	b, err := packet.Header.Marshal()
+
+	if err != nil {
+		return
+	}
+	if !ValidateChecksum(b, uint16(packet.Header.Checksum)) {
+		return
+	}
+
 	if !d.isMyIp(packet.Header.Dst) {
 		d.sendPacket(&packet)
 		return
