@@ -13,5 +13,11 @@
  },
  "r3": {
   "binary_path": "./vrouter"
+ },
+ "r4": {
+  "binary_path": "./vrouter"
+ },
+ "r5": {
+  "binary_path": "./vrouter"
  }
 }

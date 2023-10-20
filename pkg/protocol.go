@@ -9,9 +9,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"os"
 	"sync"
-	"text/tabwriter"
 	"time"
 
 	ipv4header "github.com/brown-csci1680/iptcp-headers"
@@ -203,7 +201,7 @@ func (d *Device) createPacket(dst netip.Addr, protocolNum uint8, data []byte) *P
 		log.Fatalln("Error marshalling header:  ", err)
 	}
 
-	h.Checksum = int(ComputeChecksum(headerBytes))
+	h.Checksum = int(ComputeChecksum(headerBytes, 0))
 	return &Packet{Header: h, Data: data}
 }
 
@@ -254,6 +252,12 @@ func (d *Device) sendPacket(p *Packet) (int, error) {
 
 	// Change src addr to be correct interface
 	p.Header.Src = d.Interfaces[iface].Ip
+	p.Header.Checksum = 0
+	headerBytes, err := p.Header.Marshal()
+	if err != nil {
+		return 0, err
+	}
+	p.Header.Checksum = int(ComputeChecksum(headerBytes, 0))
 
 	conn := d.Listeners[iface]
 	if err != nil {
@@ -302,13 +306,11 @@ func (d *Device) getDstPrefix(dst netip.Addr) (netip.Prefix, bool) {
 }
 
 func (d *Device) Handler(packet Packet) {
-
 	b, err := packet.Header.Marshal()
-
 	if err != nil {
 		return
 	}
-	if !ValidateChecksum(b, uint16(packet.Header.Checksum)) {
+	if !ValidateChecksum(b[:packet.Header.Len], uint16(packet.Header.Checksum)) {
 		return
 	}
 
@@ -558,8 +560,8 @@ func (d *Device) addNeighboursIfStale(packet *Packet) {
 
 // Compute the checksum using the netstack package
 // GOT FROM UDP IN IP EXAMPLE
-func ComputeChecksum(b []byte) uint16 {
-	checksum := header.Checksum(b, 0)
+func ComputeChecksum(b []byte, initial uint16) uint16 {
+	checksum := header.Checksum(b, initial)
 	checksumInv := checksum ^ 0xffff
 
 	return checksumInv
@@ -567,23 +569,8 @@ func ComputeChecksum(b []byte) uint16 {
 
 func ValidateChecksum(b []byte, fromHeader uint16) bool {
 	checksum := header.Checksum(b, fromHeader)
-
-	return fromHeader == checksum
-}
-
-func ListRoutes(d *Device) {
-	w := tabwriter.NewWriter(os.Stdout, 1, 1, 1, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(w, "T\tPrefix\tNext hop\tCost\t")
-	for pre, hop := range d.Table {
-		var t string
-		if pre.Bits() == 0 {
-			t = "S"
-		} else if hop.Cost == 0 {
-			t = "L"
-		} else {
-			t = "R"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t\n", t, pre, hop.Addr, hop.Cost)
+	if checksum != fromHeader {
+		fmt.Printf("recevied checksum: %d, actual checksum: %d\n", fromHeader, checksum)
 	}
-	w.Flush()
+	return fromHeader == checksum
 }
