@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	protocol "iptcp-pedrocarlo/pkg"
+	protocol "iptcp-pedrocarlo/pkg/protocol"
 	"iptcp-pedrocarlo/pkg/utils"
 	"lnxconfig"
 	"os"

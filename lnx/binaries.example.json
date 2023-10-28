@@ -7,17 +7,5 @@
  },
  "r1": {
   "binary_path": "./vrouter"
- },
- "r2": {
-  "binary_path": "./vrouter"
- },
- "r3": {
-  "binary_path": "./vrouter"
- },
- "r4": {
-  "binary_path": "./vrouter"
- },
- "r5": {
-  "binary_path": "./vrouter"
  }
 }

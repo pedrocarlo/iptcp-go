@@ -3,7 +3,7 @@ package utils
 import (
 	"bufio"
 	"fmt"
-	protocol "iptcp-pedrocarlo/pkg"
+	protocol "iptcp-pedrocarlo/pkg/protocol"
 	"net/netip"
 	"os"
 	"strings"
