@@ -66,6 +66,22 @@ func Repl(d *protocol.Device) {
 			}
 			fmt.Printf("Sent %d bytes\n", n)
 		}
+		if splitText[0] == "a" {
+			if len(splitText) < 2 {
+				println("usage: a <port>")
+				continue
+			}
+			
+
+		}
+		if splitText[0] == "test" {
+			remoteAddrPort := netip.MustParseAddrPort("10.1.0.2:2000")
+			conn, err := d.VConnect(remoteAddrPort.Addr(), remoteAddrPort.Port())
+			if err != nil {
+				println(err)
+			}
+			println(conn.GetStatus())
+		}
 	}
 }
 

@@ -9,6 +9,11 @@ import (
 	"github.com/google/netstack/tcpip/header"
 )
 
+type TcpPacket struct {
+	TcpHdr  header.TCPFields
+	Payload []byte
+}
+
 const (
 	TcpHeaderLen         = header.TCPMinimumSize
 	TcpPseudoHeaderLen   = 12
