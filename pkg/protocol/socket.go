@@ -230,7 +230,6 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 			return nil, err
 		}
 		// TIMEOUT THREE ACKS HERE
-
 	}
 
 	key := SocketKey{remote: remoteAddrPort, host: localAddrPort, trasportType: tcp}
@@ -299,3 +298,24 @@ func (conn *VTcpConn) GetStatus() Status {
 }
 
 /* End Normal Socket Api */
+
+func SocketKeyFromSocketInterface(s Socket) SocketKey {
+	return SocketKey{remote: s.GetRemote(), host: s.GetLocal(), trasportType: tcp}
+}
+
+func GetSocketStatusStr(s Socket) string {
+	strMap := map[Status]string{
+		Listen:      "Listen",
+		CloseWait:   "CloseWait",
+		Closed:      "Closed",
+		Closing:     "Closing",
+		Established: "Established",
+		FinWait1:    "FinWait1",
+		FinWait2:    "FinWait2",
+		LastAck:     "LastAck",
+		SynRecv:     "SynRecv",
+		SynSent:     "SynSent",
+		TimeWait:    "TimeWait",
+	}
+	return strMap[s.GetStatus()]
+}

@@ -83,6 +83,8 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 
 	device.Table = make(RoutingTable)
 	device.Handlers = make(map[uint8]HandlerFunc)
+	device.listenTable = make(ListenTable)
+	device.connTable = make(ConnTable)
 
 	for _, interf := range interfaces {
 		routerInter := RouteInterface{Name: interf.Name, Ip: interf.AssignedIP, Prefix: interf.AssignedPrefix, UdpPort: interf.UDPAddr, IsUp: true}
