@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	protocol "iptcp-pedrocarlo/pkg/protocol"
 	"net/netip"
@@ -9,12 +10,24 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 )
 
 type Command func(*protocol.Device, []string, *SocketIds)
 type CommandMap map[string]Command
-type SocketIds map[uint]protocol.Socket
+
+var (
+	errSocketNotFound = errors.New("socket not found in socket table")
+)
+
+// type SocketIds map[uint]protocol.Socket
+
+type SocketIds struct {
+	IdToSocketKey map[uint]protocol.SocketKey
+	SocketKeyToId map[protocol.SocketKey]uint
+	mutex         sync.Mutex
+}
 
 func initialize() CommandMap {
 	commandMap := make(CommandMap)
@@ -42,12 +55,15 @@ func Repl(d *protocol.Device) {
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
-	socketIds := make(SocketIds)
+	socketIds := new(SocketIds)
+	socketIds.IdToSocketKey = make(map[uint]protocol.SocketKey, 0)
+	socketIds.SocketKeyToId = make(map[protocol.SocketKey]uint)
+	socketIds.mutex = sync.Mutex{}
 
 	repl(d, commandMap, keys, socketIds)
 }
 
-func repl(d *protocol.Device, commandMap CommandMap, sortedKeys []string, socketIds SocketIds) {
+func repl(d *protocol.Device, commandMap CommandMap, sortedKeys []string, socketIds *SocketIds) {
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Print("> ")
@@ -62,7 +78,7 @@ func repl(d *protocol.Device, commandMap CommandMap, sortedKeys []string, socket
 			continue
 		}
 		if ok {
-			go command(d, args[1:], &socketIds)
+			go command(d, args[1:], socketIds)
 		} else {
 			fmt.Printf("Command '%s' not found\n", args[0])
 		}
@@ -195,21 +211,6 @@ func SendTestRip(d *protocol.Device, args []string, _ *SocketIds) {
 	fmt.Printf("Sent %d bytes\n", n)
 }
 
-func addToSocketIds(socketIds *SocketIds, socket protocol.Socket) {
-	idToAdd := uint(0)
-	// Could wrap around after 2^32 entries or more but not really of concern here
-	// Not expecting that many sockets
-	for id := range *socketIds {
-		idToAdd = id + 1
-	}
-	(*socketIds)[idToAdd] = socket
-}
-
-// Maybe have a goroutine to remove entries that are closed
-func removeFromSocketIds(socketIds *SocketIds) {
-
-}
-
 func ListenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 	if len(args) < 1 {
 		println("a <port>")
@@ -226,7 +227,6 @@ func ListenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		println(err.Error())
 		return
 	}
-	addToSocketIds(socketIds, ln)
 	for {
 		// Just listen and accept
 		conn, err := ln.VAccept()
@@ -236,7 +236,6 @@ func ListenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		// TODO ADD TO REPL SOCKET TABLE
 		// Debugging
 		fmt.Printf("Accepted %s", conn.GetRemote())
-		addToSocketIds(socketIds, conn)
 	}
 }
 
@@ -256,18 +255,28 @@ func ConnectPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		println(err)
 		return
 	}
-	conn, err := d.VConnect(addrIp, uint16(port))
+	_, err = d.VConnect(addrIp, uint16(port))
 	if err != nil {
 		println(err)
 		return
 	}
-	addToSocketIds(socketIds, conn)
 }
 
 func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 10, 1, '\t', tabwriter.AlignRight)
 	fmt.Fprintf(w, "SID\tLAddr\tLPort\tRAddr\tRPort\tStatus\t\n")
-	for id, socket := range *socketIds {
+
+	updataSocketIds(d, socketIds)
+
+	for id, key := range socketIds.IdToSocketKey {
+		var socket protocol.Socket
+		socket, ok := d.ListenTable[key]
+		if !ok {
+			socket, ok = d.ConnTable[key]
+			if !ok {
+				println(errSocketNotFound)
+			}
+		}
 		remoteAddrPort := socket.GetRemote()
 		localAddrPort := socket.GetLocal()
 		fmt.Fprintf(
@@ -281,4 +290,64 @@ func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
 			protocol.GetSocketStatusStr(socket))
 	}
 	w.Flush()
+}
+
+func updataSocketIds(d *protocol.Device, socketIds *SocketIds) {
+	var newIdToSocketKey map[uint]protocol.SocketKey
+	var newSocketKeyToId map[protocol.SocketKey]uint
+	count := uint(0)
+	allSockets := make(map[protocol.SocketKey]protocol.Socket)
+	newIdToSocketKey = make(map[uint]protocol.SocketKey)
+	newSocketKeyToId = make(map[protocol.SocketKey]uint)
+
+	addAllSocketsToMap(d, allSockets)
+
+	// Maintain existing sockets
+	for key, id := range socketIds.SocketKeyToId {
+		_, ok := allSockets[key]
+		// Purge id and key if cannot find it anywhere in table
+		// socket api has its own housekeeping with closed sockets
+		// that it should remove
+		if !ok {
+			delete(socketIds.IdToSocketKey, id)
+			delete(socketIds.SocketKeyToId, key)
+		} else {
+			// Copy previous info to maintain ids
+			newIdToSocketKey[id] = key
+			newSocketKeyToId[key] = id
+		}
+	}
+	// Add new sockets not in map already
+	for key := range allSockets {
+		newOk := true
+		// Add it to some index not already in map
+		// maybe O(N^2). Try to see a better way to do this
+		_, ok := newSocketKeyToId[key]
+		// Check if key already in maps
+		if ok {
+			continue
+		}
+		for newOk {
+			_, ok := newIdToSocketKey[count]
+			newOk = ok
+			if !newOk {
+				newSocketKeyToId[key] = count
+				newIdToSocketKey[count] = key
+			}
+			count++
+		}
+	}
+	socketIds.IdToSocketKey = newIdToSocketKey
+	socketIds.SocketKeyToId = newSocketKeyToId
+}
+
+func addAllSocketsToMap(d *protocol.Device, allSockets map[protocol.SocketKey]protocol.Socket) {
+	d.Mutex.Lock()
+	for key, socket := range d.ListenTable {
+		allSockets[key] = socket
+	}
+	for key, socket := range d.ConnTable {
+		allSockets[key] = socket
+	}
+	d.Mutex.Unlock()
 }

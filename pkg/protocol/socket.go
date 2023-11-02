@@ -67,6 +67,7 @@ type VTcpListener struct {
 	localAddr     netip.AddrPort
 	d             *Device
 	listenChannel chan VTcpConn // Send remote Addr
+	status        Status
 }
 
 type VTcpConn struct {
@@ -84,24 +85,31 @@ type ConnTable map[SocketKey]*VTcpConn
 func tcpHandler(d *Device, p *Packet, _ []interface{}) {
 	tcpHdr := tcpheader.ParseTCPHeader(p.Data)
 	tcpPayload := p.Data[tcpHdr.DataOffset:]
-	tcpChecksumFromHeader := tcpHdr.Checksum
+	// tcpChecksumFromHeader := tcpHdr.Checksum
 	tcpHdr.Checksum = 0
-	tcpComputedChecksum := tcpheader.ComputeTCPChecksum(&tcpHdr, p.Header.Src, p.Header.Dst, tcpPayload)
-	if tcpChecksumFromHeader != tcpComputedChecksum {
-		return
-	}
+	// tcpComputedChecksum := tcpheader.ComputeTCPChecksum(&tcpHdr, p.Header.Src, p.Header.Dst, tcpPayload)
+
+	// TODO CHECKSUM LATER
+
+	// if tcpChecksumFromHeader != tcpComputedChecksum {
+	// 	return
+	// }
 	tcpPacket := tcpheader.TcpPacket{TcpHdr: tcpHdr, Payload: tcpPayload}
 	// DO something with the payload
-	go handlerFlags(d, p, &tcpPacket)
+	handlerFlags(d, p, &tcpPacket)
 }
 
 func handlerFlags(d *Device, p *Packet, tcpPacket *tcpheader.TcpPacket) {
 	key := SocketKeyFromPacketAndTcpHdr(p.Header, tcpPacket.TcpHdr)
+	listenKey := SocketKeyDefaultListen(tcpPacket.TcpHdr)
 	tcpHdr := tcpPacket.TcpHdr
 	switch tcpHdr.Flags {
 	case SYN:
-		ln, ok := d.listenTable[key]
+		// d.Mutex.Lock()
+		ln, ok := d.ListenTable[listenKey]
+		// d.Mutex.Unlock()
 		// Connect only if in table
+
 		if ok {
 			conn := d.CreateSocket(key.remote, key.host.Port())
 			conn.tcb.initialAck = tcpHdr.SeqNum
@@ -110,21 +118,14 @@ func handlerFlags(d *Device, p *Packet, tcpPacket *tcpheader.TcpPacket) {
 		}
 	case SYN + ACK:
 		// Syn Received
-		conn, ok := d.connTable[key]
+		conn, ok := d.ConnTable[key]
 		if ok {
-			tcpPacket := conn.CreateTcpPacket(tcpHdr.SeqNum+1, tcpHdr.AckNum, ACK, make([]byte, 1))
+			println(key.remote.String())
+			tcpPacket := conn.CreateTcpPacket(tcpHdr.SeqNum+1, tcpHdr.AckNum, ACK, make([]byte, 0))
 			conn.listenChannel <- tcpPacket
 			// Send Ack Back
 			d.SendTcp(key.remote.Addr(), tcpPacket) // See if I care about return values here
 		}
-	}
-}
-
-func SocketKeyFromPacketAndTcpHdr(ipHdr ipv4header.IPv4Header, tcpHdr header.TCPFields) SocketKey {
-	return SocketKey{
-		remote:       netip.AddrPortFrom(ipHdr.Src, tcpHdr.SrcPort),
-		host:         netip.AddrPortFrom(ipHdr.Dst, tcpHdr.DstPort),
-		trasportType: tcp,
 	}
 }
 
@@ -137,13 +138,17 @@ func (d *Device) VListen(port uint16) (*VTcpListener, error) {
 	localAddrPort := netip.MustParseAddrPort(fmt.Sprintf("0.0.0.0:%d", port))
 	key := SocketKey{remote: remoteAddrPort, host: localAddrPort, trasportType: tcp}
 	// Check in table
-	_, ok := d.listenTable[key]
+	d.Mutex.Lock()
+	_, ok := d.ListenTable[key]
+	d.Mutex.Unlock()
 	if ok {
 		return nil, errPortInUse
 	}
 	// Spawn a thread
-	ln := &VTcpListener{remoteAddr: remoteAddrPort, localAddr: localAddrPort, d: d, listenChannel: make(chan VTcpConn)}
-	d.listenTable[key] = ln
+	ln := &VTcpListener{remoteAddr: remoteAddrPort, localAddr: localAddrPort, d: d, listenChannel: make(chan VTcpConn), status: Listen}
+	d.Mutex.Lock()
+	d.ListenTable[key] = ln
+	d.Mutex.Unlock()
 
 	return ln, nil
 }
@@ -153,10 +158,12 @@ func (ln *VTcpListener) VAccept() (*VTcpConn, error) {
 	conn := <-ln.listenChannel
 	// conn := ln.d.CreateSocket(key.remote, key.host.Port())
 	key := SocketKey{remote: conn.remoteAddr, host: conn.localAddr, trasportType: tcp}
-	ln.d.connTable[key] = &conn
+	ln.d.Mutex.Lock()
+	ln.d.ConnTable[key] = &conn
+	ln.d.Mutex.Unlock()
 	// Send Syn Ack
 	// TODO need to have the initial seq number here to edit in tcb
-	tcpPacket := conn.CreateTcpPacket(conn.tcb.initialSeq+1, conn.tcb.initialAck, SYN+ACK, make([]byte, 1))
+	tcpPacket := conn.CreateTcpPacket(conn.tcb.initialSeq+1, conn.tcb.initialAck, SYN+ACK, make([]byte, 0))
 	_, err := conn.d.SendTcp(conn.remoteAddr.Addr(), tcpPacket)
 	if err != nil {
 		return nil, err
@@ -187,7 +194,7 @@ func (ln *VTcpListener) GetLocal() netip.AddrPort {
 }
 
 func (ln *VTcpListener) GetStatus() Status {
-	return Listen
+	return ln.status
 }
 
 func listen(ln *VTcpListener, remoteChan chan netip.AddrPort) {
@@ -211,7 +218,7 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 	localAddrPort := netip.AddrPortFrom(d.Interfaces["if0"].Ip, 10000)
 	// TODO change port later to be random
 	conn := d.CreateSocket(remoteAddrPort, localAddrPort.Port())
-	synPacket := conn.CreateTcpPacket(conn.tcb.initialSeq, conn.tcb.initialAck, SYN, make([]byte, 1))
+	synPacket := conn.CreateTcpPacket(conn.tcb.initialSeq, conn.tcb.initialAck, SYN, make([]byte, 0))
 	// Send SYN
 	_, err := d.SendTcp(conn.remoteAddr.Addr(), synPacket)
 	if err != nil {
@@ -223,7 +230,7 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 		// TODO check if it is SYN + ACK
 		conn.tcb.initialAck = synAckPacket.TcpHdr.SeqNum
 		conn.tcb.currAck = synAckPacket.TcpHdr.SeqNum + 1
-		ackPacket := conn.CreateTcpPacket(conn.tcb.currAck, conn.tcb.currSeq, ACK, make([]byte, 1))
+		ackPacket := conn.CreateTcpPacket(conn.tcb.currAck, conn.tcb.currSeq, ACK, make([]byte, 0))
 		// Send Ack back
 		_, err := d.SendTcp(conn.remoteAddr.Addr(), ackPacket)
 		if err != nil {
@@ -233,7 +240,9 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 	}
 
 	key := SocketKey{remote: remoteAddrPort, host: localAddrPort, trasportType: tcp}
-	d.connTable[key] = conn
+	d.Mutex.Lock()
+	d.ConnTable[key] = conn
+	d.Mutex.Unlock()
 	return &VTcpConn{}, nil
 }
 
@@ -303,6 +312,22 @@ func SocketKeyFromSocketInterface(s Socket) SocketKey {
 	return SocketKey{remote: s.GetRemote(), host: s.GetLocal(), trasportType: tcp}
 }
 
+func SocketKeyFromPacketAndTcpHdr(ipHdr ipv4header.IPv4Header, tcpHdr header.TCPFields) SocketKey {
+	return SocketKey{
+		remote:       netip.AddrPortFrom(ipHdr.Src, tcpHdr.SrcPort),
+		host:         netip.AddrPortFrom(ipHdr.Dst, tcpHdr.DstPort),
+		trasportType: tcp,
+	}
+}
+func SocketKeyDefaultListen(tcpHdr header.TCPFields) SocketKey {
+	zeroIpAddr := netip.MustParseAddr("0.0.0.0")
+	return SocketKey{
+		remote:       netip.AddrPortFrom(zeroIpAddr, 0),
+		host:         netip.AddrPortFrom(zeroIpAddr, tcpHdr.DstPort),
+		trasportType: tcp,
+	}
+}
+
 func GetSocketStatusStr(s Socket) string {
 	strMap := map[Status]string{
 		Listen:      "Listen",
@@ -318,4 +343,12 @@ func GetSocketStatusStr(s Socket) string {
 		TimeWait:    "TimeWait",
 	}
 	return strMap[s.GetStatus()]
+}
+
+func (key *SocketKey) GetRemote() netip.AddrPort {
+	return key.remote
+}
+
+func (key *SocketKey) GetLocal() netip.AddrPort {
+	return key.host
 }

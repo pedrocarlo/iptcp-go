@@ -56,8 +56,8 @@ type Device struct {
 	Listeners    map[string]*net.UDPConn // string interface names
 	Mutex        *sync.Mutex
 	// TODO check if needed to have it here
-	listenTable ListenTable
-	connTable   ConnTable
+	ListenTable ListenTable
+	ConnTable   ConnTable
 }
 
 type RouteInterface struct {
@@ -83,8 +83,8 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 
 	device.Table = make(RoutingTable)
 	device.Handlers = make(map[uint8]HandlerFunc)
-	device.listenTable = make(ListenTable)
-	device.connTable = make(ConnTable)
+	device.ListenTable = make(ListenTable)
+	device.ConnTable = make(ConnTable)
 
 	for _, interf := range interfaces {
 		routerInter := RouteInterface{Name: interf.Name, Ip: interf.AssignedIP, Prefix: interf.AssignedPrefix, UdpPort: interf.UDPAddr, IsUp: true}
@@ -112,6 +112,8 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 	device.RegisterRecvHandler(testProtocol, TestHandler)
 	if device.IsRouter {
 		device.RegisterRecvHandler(ripProtocol, RipHandler)
+	} else {
+		device.RegisterRecvHandler(uint8(header.TCPProtocolNumber), tcpHandler)
 	}
 
 	listeners := make(map[string]*net.UDPConn, 0)
@@ -192,7 +194,7 @@ func (d *Device) createPacket(dst netip.Addr, protocolNum uint8, data []byte) *P
 	h.ID = 0
 	h.Flags = 0
 	h.FragOff = 0
-	h.TTL = 16
+	h.TTL = 17 // TTL 16 + 1 as code is written to always decrement
 	h.Protocol = int(protocolNum)
 
 	// Default interface Change later in sendPacket
@@ -254,8 +256,8 @@ func (d *Device) sendPacket(p *Packet) (int, error) {
 		return 0, errInterfaceDown
 	}
 
-	// Change src addr to be correct interface
-	p.Header.Src = d.Interfaces[iface].Ip
+	// Recalculate chechsum
+	p.Header.TTL -= 1
 	p.Header.Checksum = 0
 	headerBytes, err := p.Header.Marshal()
 	if err != nil {
@@ -288,6 +290,12 @@ func (d *Device) SendIP(dst netip.Addr, protocolNum uint8, data []byte) (int, er
 			return 0, nil
 		}
 	}
+	_, iface, err := d.findIp(packet.Header.Dst)
+	if err != nil {
+		return 0, err
+	}
+	packet.Header.Src = d.Interfaces[iface].Ip
+
 	n, err := d.sendPacket(packet)
 	if err != nil {
 		return 0, err
@@ -317,7 +325,6 @@ func (d *Device) Handler(packet Packet) {
 	if !ValidateChecksum(b[:packet.Header.Len], uint16(packet.Header.Checksum)) {
 		return
 	}
-
 	if !d.isMyIp(packet.Header.Dst) {
 		d.sendPacket(&packet)
 		return
