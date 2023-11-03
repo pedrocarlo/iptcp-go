@@ -95,7 +95,6 @@ func tcpHandler(d *Device, p *Packet, _ []interface{}) {
 	// 	return
 	// }
 	tcpPacket := tcpheader.TcpPacket{TcpHdr: tcpHdr, Payload: tcpPayload}
-	// DO something with the payload
 	handlerFlags(d, p, &tcpPacket)
 }
 
@@ -116,15 +115,11 @@ func handlerFlags(d *Device, p *Packet, tcpPacket *tcpheader.TcpPacket) {
 			conn.tcb.currAck = tcpHdr.SeqNum
 			ln.listenChannel <- *conn
 		}
-	case SYN + ACK:
-		// Syn Received
+	default:
 		conn, ok := d.ConnTable[key]
 		if ok {
-			println(key.remote.String())
-			tcpPacket := conn.CreateTcpPacket(tcpHdr.SeqNum+1, tcpHdr.AckNum, ACK, make([]byte, 0))
-			conn.listenChannel <- tcpPacket
+			conn.listenChannel <- *tcpPacket
 			// Send Ack Back
-			d.SendTcp(key.remote.Addr(), tcpPacket) // See if I care about return values here
 		}
 	}
 }
@@ -156,29 +151,33 @@ func (d *Device) VListen(port uint16) (*VTcpListener, error) {
 // See later timeout here if does not receive second part of the handshake
 func (ln *VTcpListener) VAccept() (*VTcpConn, error) {
 	conn := <-ln.listenChannel
-	// conn := ln.d.CreateSocket(key.remote, key.host.Port())
-	key := SocketKey{remote: conn.remoteAddr, host: conn.localAddr, trasportType: tcp}
-	ln.d.Mutex.Lock()
+	key := SocketKeyFromSocketInterface(&conn)
+	conn.status = SynRecv
 	ln.d.ConnTable[key] = &conn
-	ln.d.Mutex.Unlock()
 	// Send Syn Ack
 	// TODO need to have the initial seq number here to edit in tcb
-	tcpPacket := conn.CreateTcpPacket(conn.tcb.initialSeq+1, conn.tcb.initialAck, SYN+ACK, make([]byte, 0))
+	conn.tcb.currAck += 1
+	tcpPacket := conn.CreateTcpPacket(conn.tcb.currAck, conn.tcb.initialSeq, SYN+ACK, make([]byte, 0))
 	_, err := conn.d.SendTcp(conn.remoteAddr.Addr(), tcpPacket)
 	if err != nil {
 		return nil, err
 	}
+	conn.status = SynSent
+
+	// ADD to conntable
+	conn.d.ConnTable[key] = &conn
 	// Wait for Ack from channel else timeout
 	select {
-	case responsePacket := <-conn.listenChannel:
+	case <-conn.listenChannel:
 		// TODO Make sure that it is an ACK
+		// TODO refactor this to be a separate function
 		conn.status = Established
-		conn.tcb.initialAck = responsePacket.TcpHdr.SeqNum
-		conn.tcb.currAck = responsePacket.TcpHdr.SeqNum
-		return &conn, nil
 	case <-time.NewTimer(time.Second).C:
+		// Call Vclose
+		conn.VClose()
 		return nil, errTimeout
 	}
+	return &conn, nil
 }
 
 func (ln *VTcpListener) VClose() error {
@@ -197,19 +196,18 @@ func (ln *VTcpListener) GetStatus() Status {
 	return ln.status
 }
 
-func listen(ln *VTcpListener, remoteChan chan netip.AddrPort) {
-	for {
-		// remoteAddrPort := <-remoteChan
-		// println(remoteAddrPort)
-	}
-}
-
 /* End Listen Socket Api */
 
 /* Start Normal Socket Api */
 
 func (d *Device) CreateSocket(remoteAddrPort netip.AddrPort, localPort uint16) *VTcpConn {
-	return &VTcpConn{remoteAddr: remoteAddrPort, localAddr: netip.AddrPortFrom(d.Interfaces["if0"].Ip, localPort), d: d, status: Closed, tcb: *createTCB()}
+	return &VTcpConn{
+		remoteAddr:    remoteAddrPort,
+		localAddr:     netip.AddrPortFrom(d.Interfaces["if0"].Ip, localPort),
+		d:             d,
+		listenChannel: make(chan tcpheader.TcpPacket),
+		status:        Closed,
+		tcb:           *createTCB()}
 }
 
 // For now do not choose a random port
@@ -218,8 +216,11 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 	localAddrPort := netip.AddrPortFrom(d.Interfaces["if0"].Ip, 10000)
 	// TODO change port later to be random
 	conn := d.CreateSocket(remoteAddrPort, localAddrPort.Port())
-	synPacket := conn.CreateTcpPacket(conn.tcb.initialSeq, conn.tcb.initialAck, SYN, make([]byte, 0))
+	key := SocketKeyFromSocketInterface(conn)
+	d.ConnTable[key] = conn
+	conn.status = SynSent
 	// Send SYN
+	synPacket := conn.CreateTcpPacket(conn.tcb.initialAck, conn.tcb.initialSeq, SYN, make([]byte, 0))
 	_, err := d.SendTcp(conn.remoteAddr.Addr(), synPacket)
 	if err != nil {
 		return nil, err
@@ -236,14 +237,15 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 		if err != nil {
 			return nil, err
 		}
+		conn.status = Established
+	// FOR now just 3 seconds timeout change later
+	case <-time.NewTimer(time.Duration(time.Second * 3)).C:
+		// CALL VCLOUSE
 		// TIMEOUT THREE ACKS HERE
+		conn.VClose()
+		return nil, errTimeout
 	}
-
-	key := SocketKey{remote: remoteAddrPort, host: localAddrPort, trasportType: tcp}
-	d.Mutex.Lock()
-	d.ConnTable[key] = conn
-	d.Mutex.Unlock()
-	return &VTcpConn{}, nil
+	return conn, nil
 }
 
 func (conn *VTcpConn) VRead(buf []byte) (int, error) {
@@ -254,7 +256,9 @@ func (conn *VTcpConn) VWrite(data []byte) (int, error) {
 	return 0, nil
 }
 
+// For now just say closed
 func (conn *VTcpConn) VClose() error {
+	conn.status = Closed
 	return nil
 }
 
@@ -274,7 +278,7 @@ func (conn *VTcpConn) CreateTcpPacket(ackNum uint32, seqNum uint32, flags uint8,
 	}
 	checksum := tcpheader.ComputeTCPChecksum(&hdr, conn.localAddr.Addr(), conn.remoteAddr.Addr(), payload)
 	hdr.Checksum = checksum
-	println(tcpheader.TCPFieldsToString(&hdr))
+	// println(tcpheader.TCPFieldsToString(&hdr))
 	return tcpheader.TcpPacket{TcpHdr: hdr, Payload: payload}
 }
 

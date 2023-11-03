@@ -1,5 +1,7 @@
 package protocol
 
+import "math/rand"
+
 // Pointers store actual sequence numbers
 type TCB struct {
 	initialAck uint32
@@ -33,6 +35,8 @@ func createTCB() *TCB {
 	tcb.recvBuf = make([]byte, uint(tcbSize)+1)
 	tcb.sendBuf = make([]byte, uint(tcbSize)+1)
 	tcb.ackedBytesMap = map[uint]byte{}
+	tcb.initialSeq = rand.Uint32()
+	tcb.currSeq = tcb.initialSeq
 	return tcb
 }
 

@@ -211,6 +211,7 @@ func SendTestRip(d *protocol.Device, args []string, _ *SocketIds) {
 	fmt.Printf("Sent %d bytes\n", n)
 }
 
+// Update Repl table
 func ListenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 	if len(args) < 1 {
 		println("a <port>")
@@ -239,6 +240,7 @@ func ListenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 	}
 }
 
+// Update repl Table
 func ConnectPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 	if len(args) < 2 {
 		println("usage: c <vip> <port>")
@@ -260,10 +262,12 @@ func ConnectPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		println(err)
 		return
 	}
+	updataSocketIds(d, socketIds)
 }
 
 func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 10, 1, '\t', tabwriter.AlignRight)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprint(w, "\n")
 	fmt.Fprintf(w, "SID\tLAddr\tLPort\tRAddr\tRPort\tStatus\t\n")
 
 	updataSocketIds(d, socketIds)
@@ -281,7 +285,7 @@ func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
 		localAddrPort := socket.GetLocal()
 		fmt.Fprintf(
 			w,
-			"%d\t%s\t%d\t%s\t%d\t%s\n",
+			"%d\t%s\t%d\t%s\t%d\t%s\t\n",
 			id,
 			remoteAddrPort.Addr(),
 			remoteAddrPort.Port(),
@@ -342,12 +346,10 @@ func updataSocketIds(d *protocol.Device, socketIds *SocketIds) {
 }
 
 func addAllSocketsToMap(d *protocol.Device, allSockets map[protocol.SocketKey]protocol.Socket) {
-	d.Mutex.Lock()
 	for key, socket := range d.ListenTable {
 		allSockets[key] = socket
 	}
 	for key, socket := range d.ConnTable {
 		allSockets[key] = socket
 	}
-	d.Mutex.Unlock()
 }
