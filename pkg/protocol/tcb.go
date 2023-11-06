@@ -4,25 +4,25 @@ import "math/rand"
 
 // Pointers store actual sequence numbers
 type TCB struct {
-	initialAck uint32
-	initialSeq uint32
-	currAck    uint32
-	currSeq    uint32
-	sendBuf    []byte
+	irs uint32
+	iss uint32
+	// currAck    uint32
+	// currSeq    uint32
+	sendBuf []byte
 	// Oldest Unacked Segment
 	sendUna uint
 	// Next Byte Send
 	sendNxt uint
 	// Last Byte Write
 	sendLbw uint
-	recvBuf []byte
+	rcvBuf  []byte
 	// Next Byte Read
 	rcvNxt uint
 	// Last Byte Read
 	rcvLbRead uint
 	// Last Ordered Byte Acked not Read
 	rcvFba        uint
-	ackedBytesMap map[uint]byte
+	ackedBytesMap map[uint]bool
 }
 
 const (
@@ -32,12 +32,20 @@ const (
 // TODO later see best values to initialize sequence numbers
 func createTCB() *TCB {
 	tcb := new(TCB)
-	tcb.recvBuf = make([]byte, uint(tcbSize)+1)
+	tcb.rcvBuf = make([]byte, uint(tcbSize)+1)
 	tcb.sendBuf = make([]byte, uint(tcbSize)+1)
-	tcb.ackedBytesMap = map[uint]byte{}
-	tcb.initialSeq = rand.Uint32()
-	tcb.currSeq = tcb.initialSeq
+	tcb.ackedBytesMap = map[uint]bool{}
+	tcb.iss = rand.Uint32()
 	return tcb
+}
+
+func (tcb *TCB) setSynSentState() {
+	tcb.sendUna = uint(tcb.iss)
+	tcb.sendNxt = uint(tcb.iss) + 1
+}
+
+func (tcb *TCB) setSynReceivedState() {
+	tcb.rcvNxt = uint(tcb.irs)
 }
 
 // maybe could have a problem with value being 1 value smaller of real size
@@ -54,17 +62,17 @@ func wrapIndex(idx uint) uint {
 // Maybe have a map of acked bytes but not necessarily in order
 // What happens when you have to add stuff? Question for prof
 func (tcb *TCB) add2Read(seqNum uint, data byte) error {
-	tmp := wrapIndex(seqNum)
+	// tmp := wrapIndex(seqNum)
 	// TODO have error case here when you should not add to read
 	// MAYBE block add instead of error here
 	_, ok := tcb.ackedBytesMap[seqNum]
 	if ok {
 		return nil
 	}
-	tcb.recvBuf[tmp] = data
-	tcb.ackedBytesMap[seqNum] = data
-	if seqNum == tcb.rcvFba+1 {
-		tcb.rcvFba = seqNum
-	}
+	// tcb.recvBuf[tmp] = data
+	// tcb.ackedBytesMap[seqNum] = data
+	// if seqNum == tcb.rcvFba+1 {
+	// 	tcb.rcvFba = seqNum
+	// }
 	return nil
 }
