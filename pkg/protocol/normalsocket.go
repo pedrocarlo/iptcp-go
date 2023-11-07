@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"time"
 
+	ipv4header "github.com/brown-csci1680/iptcp-headers"
 	"github.com/google/netstack/tcpip/header"
 )
 
@@ -73,21 +74,45 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 
 // Check rfc for all edge cases
 func (conn *VTcpConn) VRead(buf []byte) (int, error) {
-	return 0, nil
+	bytesRead := 0
+	switch conn.status {
+	case Established:
+		// Handler in the background adds to rcvBuf
+		dataRead := conn.tcb.readFromRecv(uint32(len(buf)))
+		copy(buf[:len(dataRead)], dataRead)
+		bytesRead += len(dataRead)
+	}
+	return bytesRead, nil
 }
 
 func (conn *VTcpConn) VWrite(data []byte) (int, error) {
-	switch conn.status {
-	case SynSent:
-		// Queue the data for transmission after entering ESTABLISHED state.
-		//If no space to queue, respond with "error: insufficient resources".
-	case CloseWait:
-		// Segmentize the buffer and send it with a piggybacked acknowledgment (acknowledgment value = RCV.NXT).
-		// If there is insufficient space to remember this buffer, simply return "error: insufficient resources".
-	case TimeWait:
-		return 0, errClosing
+	// Maybe just split up payload to be smaller the segment size here
+	bytesSend := 0
+	// Segmenting data to be <= MSS
+	// Let tcb see if it can send that amount of data or not and block
+	for i := 0; i < len(data); i += int(Mss) {
+		segData := data[i:min(i+int(Mss), len(data))]
+		switch conn.status {
+		case Established:
+			conn.tcb.add2Send(conn.signalChannel, segData)
+			// Data send should always be <=Mss size if segData < MSS
+			dataSend := conn.tcb.readFromSend()
+			n, err := conn.send(conn.tcb.sendNxt, conn.tcb.rcvNxt, ACK, dataSend)
+			bytesSend += n
+			if err != nil {
+				return bytesSend, err
+			}
+		case SynSent:
+			// Queue the data for transmission after entering ESTABLISHED state.
+			//If no space to queue, respond with "error: insufficient resources".
+		case CloseWait:
+			// Segmentize the buffer and send it with a piggybacked acknowledgment (acknowledgment value = RCV.NXT).
+			// If there is insufficient space to remember this buffer, simply return "error: insufficient resources".
+		case TimeWait:
+			return 0, errClosing
+		}
 	}
-	return 0, nil
+	return bytesSend, nil
 }
 
 // For now just say closed
@@ -130,7 +155,9 @@ func (d *Device) SendTcp(dst netip.Addr, tcpPacket tcpheader.TcpPacket) (int, er
 	ipPacketPayload := make([]byte, 0, len(tcpHeaderBytes)+len(tcpPacket.Payload))
 	ipPacketPayload = append(ipPacketPayload, tcpHeaderBytes...)
 	ipPacketPayload = append(ipPacketPayload, []byte(tcpPacket.Payload)...)
-	return d.SendIP(dst, uint8(tcpheader.IpProtoTcp), ipPacketPayload)
+	n, err := d.SendIP(dst, uint8(tcpheader.IpProtoTcp), ipPacketPayload)
+	n -= tcpheader.TcpHeaderLen + ipv4header.HeaderLen
+	return n, err
 }
 
 func (conn *VTcpConn) GetRemote() netip.AddrPort {

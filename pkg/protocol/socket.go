@@ -53,6 +53,11 @@ const (
 	PSH = header.TCPFlagPsh
 )
 
+const (
+	// Maximum segment size
+	Mss uint = 1400 - ipv4header.HeaderLen - tcpheader.TcpHeaderLen
+)
+
 type Socket interface {
 	GetRemote() netip.AddrPort
 	GetLocal() netip.AddrPort

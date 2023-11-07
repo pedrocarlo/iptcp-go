@@ -13,6 +13,8 @@ func handleConnStatus(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 		err = handleSynSentState(conn, tcpPacket)
 	case SynRecv:
 		err = handleSynRecvState(conn, tcpPacket)
+	case Established:
+		err = handleEstablished(conn, tcpPacket)
 	}
 	return err
 }
@@ -65,7 +67,9 @@ func handleSynSentState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 	// Bad design should try to process the SYN + ACK on the first part
 	if flags&SYN == SYN {
 		conn.tcb.rcvNxt = hdr.SeqNum + 1
+		conn.tcb.rcvLbr = conn.tcb.rcvNxt
 		conn.tcb.irs = hdr.SeqNum
+		conn.tcb.sendWnd = hdr.WindowSize
 		if flags&ACK == ACK {
 			conn.tcb.sendUna = hdr.AckNum
 			// segments on the retransmission queue that are thereby acknowledged
@@ -78,7 +82,7 @@ func handleSynSentState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 		// Becomes the listener now?
 		conn.sendFlags(conn.tcb.iss, uint32(conn.tcb.rcvNxt), SYN+ACK)
 		conn.status = SynRecv
-		
+
 		// TODO
 		// Set the variables:
 		// SND.WND <- SEG.WND
@@ -118,6 +122,30 @@ func handleSynRecvState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 			println("sending reset synrecv")
 			conn.sendRst(hdr.AckNum)
 			conn.signalChannel <- false
+		}
+	}
+	return nil
+}
+
+// For now just focus on ACK
+func handleEstablished(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
+	flags := tcpPacket.TcpHdr.Flags
+	hdr := tcpPacket.TcpHdr
+	if flags&ACK == ACK {
+		if conn.isAckValid(hdr.AckNum) {
+			// Advance pointers
+			conn.tcb.sendUna = hdr.AckNum
+			conn.tcb.sendWnd = hdr.WindowSize
+			// TODO Check to retrasmit
+			// Packet Loss/Dropped along the way
+			if len(tcpPacket.Payload) > 0 {
+				if len(tcpPacket.Payload)+int(conn.tcb.rcvNxt) != int(hdr.SeqNum) {
+					println("packet loss")
+				}
+				conn.tcb.add2Read(tcpPacket.Payload)
+			}
+		} else {
+			// Send Reset I think
 		}
 	}
 	return nil

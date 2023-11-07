@@ -43,6 +43,8 @@ func initialize() CommandMap {
 	commandMap["a"] = ListenPort
 	commandMap["c"] = ConnectPort
 	commandMap["ls"] = ListSockets
+	commandMap["s"] = SendTcp
+	commandMap["r"] = ReceiveTcp
 
 	return commandMap
 }
@@ -211,11 +213,11 @@ func SendTestRip(d *protocol.Device, args []string, _ *SocketIds) {
 	fmt.Printf("Sent %d bytes\n", n)
 }
 
-// Update Repl table
 func ListenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 	go listenPort(d, args, socketIds)
 }
 
+// Update Repl table
 func listenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 	if len(args) < 1 {
 		println("a <port>")
@@ -238,8 +240,8 @@ func listenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		if err != nil {
 			continue
 		}
-		// TODO ADD TO REPL SOCKET TABLE
 		// Debugging
+		updataSocketIds(d, socketIds)
 		fmt.Printf("Accepted %s\n", conn.GetRemote())
 	}
 }
@@ -298,6 +300,66 @@ func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
 			protocol.GetSocketStatusStr(socket))
 	}
 	w.Flush()
+}
+
+func SendTcp(d *protocol.Device, args []string, socketIds *SocketIds) {
+	if len(args) < 2 {
+		println("usage: s <socket ID> <bytes>")
+		return
+	}
+	socketIdStr, payload := args[0], args[1]
+	conn, err := getSocket(socketIdStr, d, socketIds)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	n, err := conn.VWrite([]byte(payload))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Printf("Sent %d bytes\n", n)
+}
+
+func ReceiveTcp(d *protocol.Device, args []string, socketIds *SocketIds) {
+	if len(args) < 2 {
+		println("usage: r <socketID> <numbytes>")
+		return
+	}
+	socketIdStr, numBytesStr := args[0], args[1]
+	conn, err := getSocket(socketIdStr, d, socketIds)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	numBytes, err := strconv.Atoi(numBytesStr)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	buf := make([]byte, numBytes)
+	n, err := conn.VRead(buf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Printf("Read %d bytes: %s\n", n, buf[:n])
+}
+
+func getSocket(idStr string, d *protocol.Device, socketIds *SocketIds) (*protocol.VTcpConn, error) {
+	socketId, err := strconv.Atoi(idStr)
+	if err != nil {
+		return nil, err
+	}
+	socketKey, ok := socketIds.IdToSocketKey[uint(socketId)]
+	if !ok {
+		return nil, errSocketNotFound
+	}
+	conn, ok := d.ConnTable[socketKey]
+	if !ok {
+		return nil, errSocketNotFound
+	}
+	return conn, nil
 }
 
 func updataSocketIds(d *protocol.Device, socketIds *SocketIds) {
