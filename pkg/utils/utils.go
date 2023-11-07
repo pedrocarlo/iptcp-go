@@ -78,7 +78,7 @@ func repl(d *protocol.Device, commandMap CommandMap, sortedKeys []string, socket
 			continue
 		}
 		if ok {
-			go command(d, args[1:], socketIds)
+			command(d, args[1:], socketIds)
 		} else {
 			fmt.Printf("Command '%s' not found\n", args[0])
 		}
@@ -178,7 +178,7 @@ func SendMessage(d *protocol.Device, args []string, _ *SocketIds) {
 	addr, msg := args[0], args[1]
 	addrIp, err := netip.ParseAddr(addr)
 	if err != nil {
-		println(err)
+		fmt.Println(err)
 		return
 	}
 	n, _ := d.SendIP(addrIp, 0, []byte(msg))
@@ -213,6 +213,10 @@ func SendTestRip(d *protocol.Device, args []string, _ *SocketIds) {
 
 // Update Repl table
 func ListenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
+	go listenPort(d, args, socketIds)
+}
+
+func listenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 	if len(args) < 1 {
 		println("a <port>")
 		return
@@ -236,7 +240,7 @@ func ListenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		}
 		// TODO ADD TO REPL SOCKET TABLE
 		// Debugging
-		fmt.Printf("Accepted %s", conn.GetRemote())
+		fmt.Printf("Accepted %s\n", conn.GetRemote())
 	}
 }
 
@@ -249,17 +253,17 @@ func ConnectPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 	addr, portStr := args[0], args[1]
 	addrIp, err := netip.ParseAddr(addr)
 	if err != nil {
-		println(err)
+		fmt.Println(err)
 		return
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		println(err)
+		fmt.Println(err)
 		return
 	}
 	_, err = d.VConnect(addrIp, uint16(port))
 	if err != nil {
-		println(err)
+		fmt.Println(err)
 		return
 	}
 	updataSocketIds(d, socketIds)
@@ -287,10 +291,10 @@ func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
 			w,
 			"%d\t%s\t%d\t%s\t%d\t%s\t\n",
 			id,
-			remoteAddrPort.Addr(),
-			remoteAddrPort.Port(),
 			localAddrPort.Addr(),
 			localAddrPort.Port(),
+			remoteAddrPort.Addr(),
+			remoteAddrPort.Port(),
 			protocol.GetSocketStatusStr(socket))
 	}
 	w.Flush()

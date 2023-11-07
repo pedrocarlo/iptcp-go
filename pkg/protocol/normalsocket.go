@@ -2,6 +2,7 @@ package protocol
 
 import (
 	tcpheader "iptcp-pedrocarlo/pkg/tcp-headers"
+	"math/rand"
 	"net/netip"
 	"time"
 
@@ -15,31 +16,40 @@ type VTcpConn struct {
 	listenChannel chan tcpheader.TcpPacket // TODO CHANGE LATER
 	status        Status
 	tcb           TCB
+	signalChannel chan bool
 }
 
 /* Start Normal Socket Api */
 
 // TODO Create socket should return an error is there are no sufficent resourceS?
 func (d *Device) CreateSocket(remoteAddrPort netip.AddrPort, localPort uint16) *VTcpConn {
+	// Create TCB later with a separate call
 	return &VTcpConn{
 		remoteAddr:    remoteAddrPort,
 		localAddr:     netip.AddrPortFrom(d.Interfaces["if0"].Ip, localPort),
 		d:             d,
 		listenChannel: make(chan tcpheader.TcpPacket),
 		status:        Closed,
-		tcb:           *createTCB()}
+		signalChannel: make(chan bool),
+	}
+}
+
+func (conn *VTcpConn) initializeTcb() {
+	conn.tcb = *createTCB()
 }
 
 // For now do not choose a random port
 // Should I account for a listen socket trying to initiate a connection?
 func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 	remoteAddrPort := netip.AddrPortFrom(addr, port)
-	localAddrPort := netip.AddrPortFrom(d.Interfaces["if0"].Ip, 10000)
+	// Ports above 20000
+	randPort := uint16(rand.Uint32())%(^uint16(0)-20000) + 20000
+	localAddrPort := netip.AddrPortFrom(d.Interfaces["if0"].Ip, randPort)
 	if !remoteAddrPort.IsValid() {
 		return nil, errInvalidIp
 	}
-	// TODO change port later to be random
 	conn := d.CreateSocket(remoteAddrPort, localAddrPort.Port())
+	conn.initializeTcb()
 	key := SocketKeyFromSocketInterface(conn)
 	conn.d.ConnTable[key] = conn
 	_, err := conn.sendSyn()
@@ -49,21 +59,16 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 	}
 	// Wait for SYN + ACK
 	select {
-	case synAckPacket := <-conn.listenChannel:
-		// TODO check if it is SYN + ACK
-		_, err := conn.sendFirstAck(synAckPacket)
-		if err != nil {
-			return nil, err
-		}
-		conn.status = Established
+	case <-conn.signalChannel:
+		return conn, nil
 	// FOR now just 3 seconds timeout change later
 	case <-time.NewTimer(time.Duration(time.Second * 3)).C:
 		// CALL VCLOSE
 		// TIMEOUT THREE ACKS HERE
+		println("timeout")
 		conn.VClose()
 		return nil, errTimeout
 	}
-	return conn, nil
 }
 
 // Check rfc for all edge cases
@@ -111,9 +116,6 @@ func (conn *VTcpConn) CreateTcpPacket(seqNum uint32, ackNum uint32, flags uint8,
 	return tcpheader.TcpPacket{TcpHdr: hdr, Payload: payload}
 }
 
-// TODO should make this private later
-// TODO check if this is correct way to communicate with lower layer
-
 func (conn *VTcpConn) SendSynchronized(payload []byte) {
 
 }
@@ -144,47 +146,6 @@ func (conn *VTcpConn) GetStatus() Status {
 	return conn.status
 }
 
-// TODO ask professor how to handle receiving just a SYN here without ACK
-func (conn *VTcpConn) handleSynSentState(tcpPacket tcpheader.TcpPacket) error {
-	flags := tcpPacket.TcpHdr.Flags
-	hdr := tcpPacket.TcpHdr
-	if flags&ACK == ACK {
-		if !conn.isAckCorrect(hdr.AckNum) {
-			conn.sendRst(hdr.AckNum)
-			return errIncorrectAck
-		}
-		if !conn.isAckValid(hdr.AckNum) {
-			return errInvalidAck
-		}
-		// ACK + RST
-		if flags&RST == RST {
-			conn.VClose()
-			return errConnectionReset
-		}
-	}
-	// Bad design should try to process the SYN ACK on the first part
-	if flags&SYN == SYN {
-		conn.tcb.rcvNxt = uint(hdr.SeqNum) + 1
-		conn.tcb.irs = hdr.SeqNum
-		if flags&ACK == ACK {
-			conn.tcb.sendUna = uint(hdr.AckNum)
-			// segments on the retransmission queue that are thereby acknowledged
-			// should be removed
-			conn.status = Established
-			_, err := conn.sendAck(uint32(conn.tcb.sendNxt), uint32(conn.tcb.rcvNxt))
-			return err
-		}
-		conn.sendFlags(conn.tcb.iss, uint32(conn.tcb.rcvNxt), SYN+ACK)
-		conn.status = SynRecv
-		// TODO
-		// Set the variables:
-		// SND.WND <- SEG.WND
-		// SND.WL1 <- SEG.SEQ
-		// SND.WL2 <- SEG.ACK
-	}
-	return nil
-}
-
 // general send
 func (conn *VTcpConn) send(seqNum uint32, ackNum uint32, flags uint8, payload []byte) (int, error) {
 	packet := conn.CreateTcpPacket(seqNum, ackNum, flags, payload)
@@ -200,38 +161,23 @@ func (conn *VTcpConn) sendAck(seqNum uint32, ackNum uint32) (int, error) {
 	return conn.sendFlags(seqNum, ackNum, ACK)
 }
 
-// TODO see if status should be changed here
 func (conn *VTcpConn) sendSyn() (int, error) {
-	conn.tcb.setSynSentState()
-	// Send SYN
 	return conn.sendFlags(conn.tcb.iss, conn.tcb.irs, SYN)
 }
 
-func (conn *VTcpConn) sendFirstAck(synAckPacket tcpheader.TcpPacket) (int, error) {
-	conn.tcb.irs = synAckPacket.TcpHdr.SeqNum
-	// conn.tcb.currAck = synAckPacket.TcpHdr.SeqNum + 1
-	// Set first ack state
-	ackPacket := conn.CreateTcpPacket(uint32(conn.tcb.sendNxt), uint32(conn.tcb.rcvNxt), ACK, make([]byte, 0))
-	// Send Ack back
-	return conn.d.SendTcp(conn.remoteAddr.Addr(), ackPacket)
-}
-
-func (conn *VTcpConn) sendRst(ackNum uint32) {
+func (conn *VTcpConn) sendRst(ackNum uint32) (int, error) {
 	rstPacket := conn.CreateTcpPacket(0, ackNum, RST, make([]byte, 0))
-	conn.d.SendTcp(conn.remoteAddr.Addr(), rstPacket)
+	return conn.d.SendTcp(conn.remoteAddr.Addr(), rstPacket)
 }
 
 // Ack is correct if it references values whithin the bounds of ISS and SND.NXT pointer
-func (conn *VTcpConn) isAckCorrect(ackNum uint32) bool {
+func (conn *VTcpConn) isAckCorrectBound(ackNum uint32) bool {
 	return !(ackNum <= conn.tcb.iss || ackNum > uint32(conn.tcb.sendNxt))
 }
 
+// TODO ignoring edge case when number overflows or sequence wraps
 func (conn *VTcpConn) isAckValid(ackNum uint32) bool {
-	return conn.tcb.sendUna < uint(ackNum) && ackNum <= uint32(conn.tcb.sendNxt)
+	return conn.tcb.sendUna < ackNum && ackNum <= uint32(conn.tcb.sendNxt)
 }
 
 /* End Normal Socket Api */
-
-func (conn *VTcpConn) resetIfAck(tcpPacket tcpheader.TcpPacket) {
-
-}

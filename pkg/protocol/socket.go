@@ -14,8 +14,6 @@ var (
 	errTimeout         = errors.New("connection timed out")
 	errInvalidIp       = errors.New("remote socket unspecified, ip is not valid")
 	errClosing         = errors.New("connection closing")
-	errInvalidRst      = errors.New("invalid reset received")
-	errInvalidFlag     = errors.New("invalid flag received")
 	errInvalidAck      = errors.New("invalid ack received")
 	errIncorrectAck    = errors.New("incorrect ack number received")
 	errConnectionReset = errors.New("reset flag received, connection reset")
@@ -47,12 +45,12 @@ const (
 )
 
 const (
-	SYN  = header.TCPFlagSyn
-	ACK  = header.TCPFlagAck
-	RST  = header.TCPFlagRst
-	FIN  = header.TCPFlagFin
-	URG  = header.TCPFlagUrg
-	PUSH = header.TCPFlagPsh
+	SYN = header.TCPFlagSyn
+	ACK = header.TCPFlagAck
+	RST = header.TCPFlagRst
+	FIN = header.TCPFlagFin
+	URG = header.TCPFlagUrg
+	PSH = header.TCPFlagPsh
 )
 
 type Socket interface {
@@ -63,7 +61,7 @@ type Socket interface {
 
 type SocketKey struct {
 	remote       netip.AddrPort
-	host         netip.AddrPort
+	local        netip.AddrPort
 	trasportType Transport
 }
 
@@ -83,34 +81,25 @@ func tcpHandler(d *Device, p *Packet, _ []interface{}) {
 	// 	return
 	// }
 	tcpPacket := tcpheader.TcpPacket{TcpHdr: tcpHdr, Payload: tcpPayload}
-	handlerFlags(d, p, &tcpPacket)
-}
-
-func handlerFlags(d *Device, p *Packet, tcpPacket *tcpheader.TcpPacket) {
 	key := SocketKeyFromPacketAndTcpHdr(p.Header, tcpPacket.TcpHdr)
 	listenKey := SocketKeyDefaultListen(tcpPacket.TcpHdr)
-	tcpHdr := tcpPacket.TcpHdr
-	switch tcpHdr.Flags {
-	default:
-		conn, ok := d.ConnTable[key]
-		ln, lnok := d.ListenTable[listenKey]
-		if ok {
-			conn.listenChannel <- *tcpPacket
-		}
-		if lnok {
-			ln.listenChannel <- KeyPacket{key: key, tcpPacket: *tcpPacket}
-		}
+	conn, ok := d.ConnTable[key]
+	ln, lnok := d.ListenTable[listenKey]
+	if ok {
+		handleConnStatus(conn, &tcpPacket)
+	} else if lnok {
+		handleListenState(ln, &tcpPacket, key.remote.Addr(), key.local.Addr())
 	}
 }
 
 func SocketKeyFromSocketInterface(s Socket) SocketKey {
-	return SocketKey{remote: s.GetRemote(), host: s.GetLocal(), trasportType: tcp}
+	return SocketKey{remote: s.GetRemote(), local: s.GetLocal(), trasportType: tcp}
 }
 
 func SocketKeyFromPacketAndTcpHdr(ipHdr ipv4header.IPv4Header, tcpHdr header.TCPFields) SocketKey {
 	return SocketKey{
 		remote:       netip.AddrPortFrom(ipHdr.Src, tcpHdr.SrcPort),
-		host:         netip.AddrPortFrom(ipHdr.Dst, tcpHdr.DstPort),
+		local:        netip.AddrPortFrom(ipHdr.Dst, tcpHdr.DstPort),
 		trasportType: tcp,
 	}
 }
@@ -118,7 +107,7 @@ func SocketKeyDefaultListen(tcpHdr header.TCPFields) SocketKey {
 	zeroIpAddr := netip.MustParseAddr("0.0.0.0")
 	return SocketKey{
 		remote:       netip.AddrPortFrom(zeroIpAddr, 0),
-		host:         netip.AddrPortFrom(zeroIpAddr, tcpHdr.DstPort),
+		local:        netip.AddrPortFrom(zeroIpAddr, tcpHdr.DstPort),
 		trasportType: tcp,
 	}
 }
@@ -145,7 +134,5 @@ func (key *SocketKey) GetRemote() netip.AddrPort {
 }
 
 func (key *SocketKey) GetLocal() netip.AddrPort {
-	return key.host
+	return key.local
 }
-
-/* Error Related Functions */

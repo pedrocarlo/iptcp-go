@@ -55,7 +55,6 @@ type Device struct {
 	Handlers     map[uint8]HandlerFunc
 	Listeners    map[string]*net.UDPConn // string interface names
 	Mutex        *sync.Mutex
-	// TODO check if needed to have it here
 	ListenTable ListenTable
 	ConnTable   ConnTable
 }
@@ -117,7 +116,6 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 	}
 
 	listeners := make(map[string]*net.UDPConn, 0)
-	// listenChannels := make(map[string](chan netip.Addr), 5)
 	for _, inter := range device.Interfaces {
 		addr := net.UDPAddr{
 			Port: int(inter.UdpPort.Port()),
@@ -127,8 +125,6 @@ func Initialize(configInfo lnxconfig.IPConfig) (*Device, error) {
 		if err != nil {
 			return nil, err
 		}
-		// channel := make(chan netip.Addr)
-		// listenChannels[inter.Name] = channel
 		listeners[inter.Name] = ln
 		go device.Listen(ln, inter)
 	}
@@ -286,7 +282,7 @@ func (d *Device) SendIP(dst netip.Addr, protocolNum uint8, data []byte) (int, er
 	for _, iface := range d.Interfaces {
 		// Destination is to one of its interfaces
 		if iface.Ip == packet.Header.Dst {
-			d.Handler(*packet)
+			go d.Handler(*packet)
 			return 0, nil
 		}
 	}
