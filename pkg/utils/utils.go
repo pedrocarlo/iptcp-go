@@ -235,6 +235,8 @@ func listenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		return
 	}
 	updataSocketIds(d, socketIds)
+	id := socketIds.SocketKeyToId[protocol.SocketKeyFromSocketInterface(ln)]
+	fmt.Printf("Created listen socket with ID %d\n", id)
 	for {
 		// Just listen and accept
 		conn, err := ln.VAccept()
@@ -243,7 +245,8 @@ func listenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		}
 		// Debugging
 		updataSocketIds(d, socketIds)
-		fmt.Printf("Accepted %s\n", conn.GetRemote())
+		newId := socketIds.SocketKeyToId[protocol.SocketKeyFromSocketInterface(conn)]
+		fmt.Printf("New connection on socket %d => created new socket %d\n", id, newId)
 	}
 }
 
@@ -264,12 +267,14 @@ func ConnectPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		fmt.Println(err)
 		return
 	}
-	_, err = d.VConnect(addrIp, uint16(port))
+	conn, err := d.VConnect(addrIp, uint16(port))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	updataSocketIds(d, socketIds)
+	id := socketIds.SocketKeyToId[protocol.SocketKeyFromSocketInterface(conn)]
+	fmt.Printf("Created new socket with ID %d\n", id)
 }
 
 func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
@@ -326,7 +331,7 @@ func SendTcp(d *protocol.Device, args []string, socketIds *SocketIds) {
 		fmt.Println(err)
 		return
 	}
-	fmt.Printf("Sent %d bytes\n", n)
+	fmt.Printf("Wrote %d bytes\n", n)
 }
 
 func ReceiveTcp(d *protocol.Device, args []string, socketIds *SocketIds) {

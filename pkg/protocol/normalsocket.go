@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"fmt"
 	tcpheader "iptcp-pedrocarlo/pkg/tcp-headers"
 	"math/rand"
 	"net/netip"
@@ -100,8 +99,6 @@ func (conn *VTcpConn) VWrite(data []byte) (int, error) {
 			conn.tcb.AddSend(segData)
 			// Data send should always be <=Mss size if segData < MSS
 			dataSend := conn.tcb.ReadSend()
-			fmt.Printf("SEQ: %d\n", conn.tcb.sendNxt-uint32(len(dataSend)))
-
 			n, err := conn.send(conn.tcb.sendNxt-uint32(len(dataSend)), conn.tcb.rcvNxt, ACK, dataSend)
 			bytesSent += n
 			if err != nil {
