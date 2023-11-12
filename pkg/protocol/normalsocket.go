@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"fmt"
 	tcpheader "iptcp-pedrocarlo/pkg/tcp-headers"
 	"math/rand"
 	"net/netip"
@@ -37,6 +38,7 @@ func (d *Device) CreateSocket(remoteAddrPort netip.AddrPort, localPort uint16) *
 
 func (conn *VTcpConn) initializeTcb() {
 	conn.tcb = *createTCB()
+	conn.tcb.initializeControllers()
 }
 
 // For now do not choose a random port
@@ -61,6 +63,7 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 	// Wait for SYN + ACK
 	select {
 	case <-conn.signalChannel:
+		// conn.tcb.initializeControllers()
 		return conn, nil
 	// FOR now just 3 seconds timeout change later
 	case <-time.NewTimer(time.Duration(time.Second * 3)).C:
@@ -78,7 +81,7 @@ func (conn *VTcpConn) VRead(buf []byte) (int, error) {
 	switch conn.status {
 	case Established:
 		// Handler in the background adds to rcvBuf
-		dataRead := conn.tcb.readFromRecv(uint32(len(buf)))
+		dataRead := conn.tcb.ReadRecv(uint32(len(buf)))
 		copy(buf[:len(dataRead)], dataRead)
 		bytesRead += len(dataRead)
 	}
@@ -87,20 +90,22 @@ func (conn *VTcpConn) VRead(buf []byte) (int, error) {
 
 func (conn *VTcpConn) VWrite(data []byte) (int, error) {
 	// Maybe just split up payload to be smaller the segment size here
-	bytesSend := 0
+	bytesSent := 0
 	// Segmenting data to be <= MSS
 	// Let tcb see if it can send that amount of data or not and block
 	for i := 0; i < len(data); i += int(Mss) {
 		segData := data[i:min(i+int(Mss), len(data))]
 		switch conn.status {
 		case Established:
-			conn.tcb.add2Send(conn.signalChannel, segData)
+			conn.tcb.AddSend(segData)
 			// Data send should always be <=Mss size if segData < MSS
-			dataSend := conn.tcb.readFromSend()
-			n, err := conn.send(conn.tcb.sendNxt, conn.tcb.rcvNxt, ACK, dataSend)
-			bytesSend += n
+			dataSend := conn.tcb.ReadSend()
+			fmt.Printf("SEQ: %d\n", conn.tcb.sendNxt-uint32(len(dataSend)))
+
+			n, err := conn.send(conn.tcb.sendNxt-uint32(len(dataSend)), conn.tcb.rcvNxt, ACK, dataSend)
+			bytesSent += n
 			if err != nil {
-				return bytesSend, err
+				return bytesSent, err
 			}
 		case SynSent:
 			// Queue the data for transmission after entering ESTABLISHED state.
@@ -112,7 +117,7 @@ func (conn *VTcpConn) VWrite(data []byte) (int, error) {
 			return 0, errClosing
 		}
 	}
-	return bytesSend, nil
+	return bytesSent, nil
 }
 
 // For now just say closed
@@ -137,7 +142,7 @@ func (conn *VTcpConn) CreateTcpPacket(seqNum uint32, ackNum uint32, flags uint8,
 	}
 	checksum := tcpheader.ComputeTCPChecksum(&hdr, conn.localAddr.Addr(), conn.remoteAddr.Addr(), payload)
 	hdr.Checksum = checksum
-	// println(tcpheader.TCPFieldsToString(&hdr))
+
 	return tcpheader.TcpPacket{TcpHdr: hdr, Payload: payload}
 }
 
@@ -203,8 +208,25 @@ func (conn *VTcpConn) isAckCorrectBound(ackNum uint32) bool {
 }
 
 // TODO ignoring edge case when number overflows or sequence wraps
-func (conn *VTcpConn) isAckValid(ackNum uint32) bool {
-	return conn.tcb.sendUna < ackNum && ackNum <= uint32(conn.tcb.sendNxt)
+func (conn *VTcpConn) isAckAcceptable(ackNum uint32) bool {
+	// println("sendUNa", conn.tcb.sendUna, "AckNum", ackNum, "SendNxt", conn.tcb.sendNxt)
+	return conn.tcb.sendUna < ackNum && ackNum <= conn.tcb.sendNxt
+}
+
+func (conn *VTcpConn) isSegmentAcceptable(seqNum uint32, lenData uint32) bool {
+	if lenData == 0 && conn.tcb.rcvWnd == 0 {
+		return seqNum == conn.tcb.rcvNxt
+	}
+	startSegmentInWnd := conn.tcb.rcvNxt <= seqNum && seqNum < conn.tcb.rcvNxt+uint32(conn.tcb.rcvWnd)
+	if lenData == 0 && conn.tcb.rcvWnd > 0 {
+		return startSegmentInWnd
+	}
+	if lenData > 0 && conn.tcb.rcvWnd == 0 {
+		return false
+	}
+	endSegmentNum := seqNum + lenData - 1
+	endSegmentInWnd := conn.tcb.rcvNxt <= endSegmentNum && endSegmentNum < conn.tcb.rcvNxt+uint32(conn.tcb.rcvWnd)
+	return startSegmentInWnd || endSegmentInWnd
 }
 
 /* End Normal Socket Api */

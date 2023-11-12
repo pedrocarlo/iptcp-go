@@ -55,7 +55,7 @@ func handleSynSentState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 			conn.sendRst(hdr.AckNum)
 			return errIncorrectAck
 		}
-		if !conn.isAckValid(hdr.AckNum) {
+		if !conn.isAckAcceptable(hdr.AckNum) {
 			return errInvalidAck
 		}
 		// ACK + RST
@@ -82,12 +82,6 @@ func handleSynSentState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 		// Becomes the listener now?
 		conn.sendFlags(conn.tcb.iss, uint32(conn.tcb.rcvNxt), SYN+ACK)
 		conn.status = SynRecv
-
-		// TODO
-		// Set the variables:
-		// SND.WND <- SEG.WND
-		// SND.WL1 <- SEG.SEQ
-		// SND.WL2 <- SEG.ACK
 	}
 	conn.signalChannel <- true
 	return nil
@@ -111,12 +105,11 @@ func handleSynRecvState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 		return nil
 	}
 	if flags&ACK == ACK {
-		if conn.isAckValid(tcpPacket.TcpHdr.AckNum) {
+		if conn.isAckAcceptable(tcpPacket.TcpHdr.AckNum) {
 			conn.status = Established
-			/*
-				SND.WND <- SEG.WND
-				SND.WL1 <- SEG.SEQ
-				SND.WL2 <- SEG.ACK */
+			conn.tcb.sendWnd = hdr.WindowSize
+			conn.tcb.sendWl1 = hdr.SeqNum
+			conn.tcb.sendWl2 = hdr.AckNum
 			conn.signalChannel <- true
 		} else {
 			println("sending reset synrecv")
@@ -127,26 +120,69 @@ func handleSynRecvState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 	return nil
 }
 
+// Section 3.4 retransmission of acceptable ack
 // For now just focus on ACK
+// TODO Check for SYN BIT AND RST
 func handleEstablished(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 	flags := tcpPacket.TcpHdr.Flags
 	hdr := tcpPacket.TcpHdr
-	if flags&ACK == ACK {
-		if conn.isAckValid(hdr.AckNum) {
-			// Advance pointers
-			conn.tcb.sendUna = hdr.AckNum
-			conn.tcb.sendWnd = hdr.WindowSize
-			// TODO Check to retrasmit
-			// Packet Loss/Dropped along the way
-			if len(tcpPacket.Payload) > 0 {
-				if len(tcpPacket.Payload)+int(conn.tcb.rcvNxt) != int(hdr.SeqNum) {
-					println("packet loss")
-				}
-				conn.tcb.add2Read(tcpPacket.Payload)
+	conn.tcb.sendWnd = hdr.WindowSize
+	ackNum := hdr.SeqNum
+	var err error = nil
+	// Should probably check for rst before ack
+	// Be mindful of early arrivals and see what to do with them
+	if conn.isSegmentAcceptable(hdr.SeqNum, uint32(len(tcpPacket.Payload))) {
+		// TODO Check RST later
+		if flags&RST == RST {
+			if hdr.SeqNum == conn.tcb.rcvNxt {
+				conn.sendRst(ackNum)
+				conn.VClose()
+				// Maybe see later
+				return errConnectionReset
 			}
+		}
+		if flags&ACK == ACK {
+			// SND.UNA < SEG.ACK =< SND.NXT
+			if conn.isAckAcceptable(hdr.AckNum) {
+				// conn.tcb.sendUna = hdr.AckNum
+				// Acknowledge segments in retransmission queue
+				//
+				if len(tcpPacket.Payload) > 0 {
+					conn.tcb.AddRead(tcpPacket.Payload)
+					_, err = conn.sendAck(conn.tcb.sendNxt, ackNum+uint32(len(tcpPacket.Payload)))
+				}
+				// TODO see what should be correct SeqNum here
+			} else if hdr.AckNum <= conn.tcb.sendUna {
+				return nil
+			} else if hdr.AckNum > conn.tcb.sendNxt {
+				_, err = conn.sendAck(conn.tcb.sendNxt, conn.tcb.rcvNxt)
+				return err
+			} else if conn.tcb.sendUna <= hdr.AckNum && hdr.AckNum <= conn.tcb.sendNxt {
+				// Update sendWnd
+				wl1, wl2 := conn.tcb.sendWl1, conn.tcb.sendWl2
+				if wl1 < hdr.SeqNum || (wl1 == hdr.SeqNum && wl2 <= hdr.AckNum) {
+					conn.tcb.sendWnd = hdr.WindowSize
+					conn.tcb.sendWl1 = hdr.SeqNum
+					conn.tcb.sendWl2 = hdr.AckNum
+					// Notify sendWnd changed
+					select {
+					case conn.tcb.windowSendSignal <- conn.tcb.sendWnd:
+					default:
+					}
+				}
+			}
+			return err
 		} else {
 			// Send Reset I think
+			// Zero windows probing with len == 1 of data
+			// Special Allowance for Valid ACks and RST
 		}
+	} else {
+		if flags&RST == RST {
+			return nil
+		}
+		_, err = conn.send(conn.tcb.sendNxt, conn.tcb.rcvNxt, ACK, make([]byte, 0))
+		return err
 	}
-	return nil
+	return err
 }

@@ -5,6 +5,8 @@ import (
 	"sync"
 )
 
+// TODO TODO Change implementation where pointers numbers are just added to IRS or ISS so they cannot wrap around in a normal connection state
+// Use relative addressing like wireshark
 // Pointers store actual sequence numbers
 type TCB struct {
 	// Initial Receive Sequence
@@ -20,19 +22,25 @@ type TCB struct {
 	sendLbr uint32
 	// Current size of the opposing window
 	sendWnd uint16
+	sendWl1 uint32
+	sendWl2 uint32
 	rcvBuf  []byte
 	// Next Byte Read
 	rcvNxt uint32
-	// Last Byte Read
 	rcvWnd uint16
 	// Last Byte Read from Receive Buffer
-	rcvLbr            uint32
-	ackedBytesMap     map[uint]bool
-	windowProbingChan chan bool
-	dataToReadSignal  chan bool
-	windowRecvSignal  chan bool
-	sendMutex         sync.Mutex
-	recvMutex         sync.Mutex
+	rcvLbr           uint32
+	ackedBytesMap    map[uint]bool
+	windowSendSignal chan uint16
+	dataToSendSignal chan []byte
+	windowRecvSignal chan uint16
+	dataToRecvSignal chan []byte
+	bytesToRead      chan uint
+	bytesReadRcv     chan []byte
+	bytesToSend      chan uint
+	bytesReadSend    chan []byte
+	sendMutex        sync.Mutex
+	recvMutex        sync.Mutex
 }
 
 const (
@@ -45,8 +53,14 @@ func createTCB() *TCB {
 	tcb.rcvBuf = make([]byte, uint(tcbSize)+1)
 	tcb.sendBuf = make([]byte, uint(tcbSize)+1)
 	tcb.ackedBytesMap = map[uint]bool{}
-	tcb.windowProbingChan = make(chan bool)
-	tcb.dataToReadSignal = make(chan bool)
+	tcb.windowSendSignal = make(chan uint16)
+	tcb.dataToSendSignal = make(chan []byte)
+	tcb.windowRecvSignal = make(chan uint16)
+	tcb.dataToRecvSignal = make(chan []byte)
+	tcb.bytesToRead = make(chan uint)
+	tcb.bytesToSend = make(chan uint)
+	tcb.bytesReadRcv = make(chan []byte)
+	tcb.bytesReadSend = make(chan []byte)
 	tcb.sendMutex = sync.Mutex{}
 	tcb.recvMutex = sync.Mutex{}
 	tcb.iss = rand.Uint32()
@@ -54,11 +68,22 @@ func createTCB() *TCB {
 	tcb.sendNxt = tcb.iss + 1
 	tcb.sendLbr = tcb.sendNxt
 	tcb.rcvWnd = uint16(tcbSize)
+
 	return tcb
 }
 
-func (tcb *TCB) setSynReceivedState(irs uint32, window uint16) {
+func (tcb *TCB) initializeControllers() {
+	go tcb.tcbReadController()
+	// go tcb.tcbReadBufController()
+	go tcb.tcbSendController()
+	// go tcb.tcbSendBufController()
+}
+
+func (tcb *TCB) setSynReceivedState(irs uint32, ackNum uint32, window uint16) {
 	tcb.irs = irs
+	tcb.sendWl1 = irs
+	tcb.sendWl2 = ackNum
+
 	tcb.rcvNxt = irs + 1
 	tcb.rcvLbr = tcb.rcvNxt
 	tcb.sendWnd = window
@@ -74,16 +99,97 @@ func wrapIndex(idx uint) uint {
 	return idx % (tcbSize + 1)
 }
 
-// TODO see how to have it not use 100% cpu here
-func (tcb *TCB) add2Send(signalChannel chan bool, payload []byte) {
+func (tcb *TCB) tcbReadController() {
+	for {
+		select {
+		case payload := <-tcb.dataToRecvSignal:
+			for tcb.rcvWnd < uint16(len(payload)) {
+				// Wait for some read to clear some buf size
+				<-tcb.windowRecvSignal
+			}
+			tcb.add2Read(payload)
+			select {
+			case tcb.windowRecvSignal <- tcb.rcvWnd:
+			default:
+			}
+		case bytesToRead := <-tcb.bytesToRead:
+			for tcb.rcvWnd == uint16(tcbSize) {
+				// Wait for some add to decrease windows size
+				<-tcb.windowRecvSignal
+			}
+			tcb.bytesReadRcv <- tcb.readFromRecv(uint32(bytesToRead))
+			select {
+			case tcb.windowRecvSignal <- tcb.rcvWnd:
+			default:
+			}
+		}
+	}
+}
+
+// func (tcb *TCB) tcbReadBufController() {
+// 	for {
+// 		bytesToRead := <-tcb.bytesToRead
+// 		for tcb.rcvWnd == uint16(tcbSize) {
+// 			// Wait for some add to decrease windows size
+// 			<-tcb.windowRecvSignal
+// 		}
+// 		tcb.bytesReadRcv <- tcb.readFromRecv(uint32(bytesToRead))
+// 		select {
+// 		case tcb.windowRecvSignal <- tcb.rcvWnd:
+// 		default:
+// 		}
+// 	}
+// }
+
+func (tcb *TCB) tcbSendController() {
+	for {
+		select {
+		case payload := <-tcb.dataToSendSignal:
+			for tcb.sendWnd < uint16(len(payload)) {
+				// Wait for some read to clear some buf size
+				<-tcb.windowSendSignal
+			}
+			tcb.add2Send(payload)
+			select {
+			case tcb.windowSendSignal <- tcb.sendWnd:
+			default:
+			}
+		case <-tcb.bytesToSend:
+			for tcb.sendWnd == uint16(tcbSize) {
+				// Wait for someone to decrease windows size
+				<-tcb.windowSendSignal
+			}
+			tcb.bytesReadSend <- tcb.readFromSend()
+			select {
+			case tcb.windowSendSignal <- tcb.sendWnd:
+			default:
+			}
+		}
+	}
+}
+
+// func (tcb *TCB) tcbSendBufController() {
+// 	for {
+// 		<-tcb.bytesToSend
+// 		for tcb.sendWnd == uint16(tcbSize) {
+// 			// Wait for some add to decrease windows size
+// 			<-tcb.windowSendSignal
+// 		}
+// 		tcb.bytesReadSend <- tcb.readFromSend()
+// 		select {
+// 		case tcb.windowSendSignal <- tcb.sendWnd:
+// 		default:
+// 		}
+// 	}
+// }
+
+func (tcb *TCB) AddSend(payload []byte) {
+	tcb.dataToSendSignal <- payload
+}
+
+func (tcb *TCB) add2Send(payload []byte) {
 	// See best approach to send data here, wait to send whole segment or
 	// choose a minimum size to send
-
-	// Idle here
-	// TODO Bad Design?
-	// For now idle
-	for tcb.sendWnd < uint16(len(payload)/10) {
-	}
 
 	// See if need to just be iterating over this
 	// Use windowProbing chan to block when cannot send
@@ -98,7 +204,12 @@ func (tcb *TCB) add2Send(signalChannel chan bool, payload []byte) {
 	tcb.sendMutex.Unlock()
 }
 
-// TODO ignoring wrapping around for now
+func (tcb *TCB) ReadSend() []byte {
+	tcb.bytesToSend <- 0
+	data := <-tcb.bytesReadSend
+	return data
+}
+
 func (tcb *TCB) readFromSend() []byte {
 	tcb.sendMutex.Lock()
 	// Ignoring wrap around for uint32 nums here
@@ -106,7 +217,7 @@ func (tcb *TCB) readFromSend() []byte {
 	buf := make([]byte, 0)
 	minIdx := wrapIndex(uint(tcb.sendLbr) + uint(dist))
 	startIdx := wrapIndex(uint(tcb.sendLbr))
-	// Wrapped around
+	// Wrapped around buf
 	if wrapIndex(uint(tcb.sendLbr)) > minIdx {
 		buf = append(buf, tcb.sendBuf[startIdx:]...)
 		buf = append(buf, tcb.sendBuf[:minIdx]...)
@@ -114,25 +225,30 @@ func (tcb *TCB) readFromSend() []byte {
 		buf = append(buf, tcb.sendBuf[startIdx:minIdx]...)
 	}
 	tcb.sendLbr += uint32(len(buf))
-	tcb.sendWnd += max(uint16(len(buf)), uint16(tcbSize)-tcb.rcvWnd)
+	tcb.sendWnd += max(uint16(len(buf)), uint16(tcbSize)-tcb.sendWnd)
 	tcb.sendMutex.Unlock()
+	// Signal here window space was freed
+	select {
+	case tcb.windowRecvSignal <- tcb.rcvWnd:
+	default:
+	}
 	return buf
 }
 
 // TODO
 // Maybe have a map of acked bytes but not necessarily in order
 // What happens when you have to add stuff? Question for prof
+func (tcb *TCB) AddRead(payload []byte) {
+	tcb.dataToRecvSignal <- payload
+}
 
-// For now no multipl
+// For now no wrapping on ack ack num
 func (tcb *TCB) add2Read(payload []byte) {
-
 	// TODO
 	// Question here on queue the add2Read because multiple calls
 	// could be made but recvSignal could activate for another goroutine first?
-	for tcb.rcvWnd < uint16(len(payload)/10) {
-		<-tcb.windowRecvSignal
-	}
 	tcb.recvMutex.Lock()
+	// println("start rcvnxt", tcb.rcvNxt)
 	count := wrapIndex(uint(tcb.rcvNxt))
 	for _, b := range payload {
 		tcb.rcvBuf[count] = b
@@ -140,22 +256,24 @@ func (tcb *TCB) add2Read(payload []byte) {
 		tcb.rcvNxt++
 		tcb.rcvWnd--
 	}
+	// println("end rcvnxt", tcb.rcvNxt)
 	tcb.recvMutex.Unlock()
-	// Signaling there is data to read
-	tcb.dataToReadSignal <- true
+}
+
+func (tcb *TCB) ReadRecv(count uint32) []byte {
+	tcb.bytesToRead <- uint(count)
+	data := <-tcb.bytesReadRcv
+	return data
 }
 
 func (tcb *TCB) readFromRecv(count uint32) []byte {
-	<-tcb.dataToReadSignal
 	tcb.recvMutex.Lock()
 	// Ignoring wrap around for uint32 nums here
 	dist := min(tcb.rcvNxt-tcb.rcvLbr, count)
-	println(tcb.rcvNxt - tcb.rcvLbr)
-	println(dist)
 	buf := make([]byte, 0)
 	minIdx := wrapIndex(uint(tcb.rcvLbr) + uint(dist))
 	startIdx := wrapIndex(uint(tcb.rcvLbr))
-	// Wrapped around
+	// Wrapped around buf
 	if wrapIndex(uint(tcb.rcvLbr)) > minIdx {
 		buf = append(buf, tcb.rcvBuf[startIdx:]...)
 		buf = append(buf, tcb.rcvBuf[:minIdx]...)
@@ -163,8 +281,14 @@ func (tcb *TCB) readFromRecv(count uint32) []byte {
 		buf = append(buf, tcb.rcvBuf[startIdx:minIdx]...)
 	}
 	tcb.rcvLbr += uint32(len(buf))
-	tcb.rcvWnd += max(uint16(len(buf)), uint16(tcbSize)-tcb.rcvWnd)
+	// TODO see if this breaks anything
+	tcb.rcvWnd += uint16(len(buf))
+	// tcb.rcvWnd += min(uint16(len(buf)), uint16(tcbSize)-tcb.rcvWnd)
 	tcb.recvMutex.Unlock()
 	// Signal here window space was freed
+	select {
+	case tcb.windowRecvSignal <- tcb.rcvWnd:
+	default:
+	}
 	return buf
 }

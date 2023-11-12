@@ -234,6 +234,7 @@ func listenPort(d *protocol.Device, args []string, socketIds *SocketIds) {
 		println(err.Error())
 		return
 	}
+	updataSocketIds(d, socketIds)
 	for {
 		// Just listen and accept
 		conn, err := ln.VAccept()
@@ -278,7 +279,14 @@ func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
 
 	updataSocketIds(d, socketIds)
 
-	for id, key := range socketIds.IdToSocketKey {
+	keys := make([]uint, 0, len(socketIds.IdToSocketKey))
+	for k := range socketIds.IdToSocketKey {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	for _, id := range keys {
+		key := socketIds.IdToSocketKey[id]
 		var socket protocol.Socket
 		socket, ok := d.ListenTable[key]
 		if !ok {
@@ -382,6 +390,7 @@ func updataSocketIds(d *protocol.Device, socketIds *SocketIds) {
 			delete(socketIds.IdToSocketKey, id)
 			delete(socketIds.SocketKeyToId, key)
 		} else {
+
 			// Copy previous info to maintain ids
 			newIdToSocketKey[id] = key
 			newSocketKeyToId[key] = id
@@ -395,6 +404,7 @@ func updataSocketIds(d *protocol.Device, socketIds *SocketIds) {
 		_, ok := newSocketKeyToId[key]
 		// Check if key already in maps
 		if ok {
+			count++
 			continue
 		}
 		for newOk {

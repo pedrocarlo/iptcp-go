@@ -51,7 +51,7 @@ func (ln *VTcpListener) VAccept() (*VTcpConn, error) {
 	key, synPacket := keyPacket.key, keyPacket.tcpPacket
 	conn := ln.d.CreateSocket(key.remote, key.local.Port())
 	conn.initializeTcb()
-	conn.tcb.setSynReceivedState(synPacket.TcpHdr.SeqNum, synPacket.TcpHdr.WindowSize)
+	conn.tcb.setSynReceivedState(synPacket.TcpHdr.SeqNum, synPacket.TcpHdr.AckNum, synPacket.TcpHdr.WindowSize)
 	conn.status = SynRecv
 	// Send Syn Ack
 	ln.d.ConnTable[key] = conn
@@ -64,6 +64,7 @@ func (ln *VTcpListener) VAccept() (*VTcpConn, error) {
 	// Wait for Ack from channel else timeout
 	select {
 	case <-conn.signalChannel:
+		// conn.tcb.initializeControllers()
 	// TODO See correct timeout way of doing it
 	case <-time.NewTimer(time.Second).C:
 		conn.VClose()
