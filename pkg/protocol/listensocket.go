@@ -55,7 +55,7 @@ func (ln *VTcpListener) VAccept() (*VTcpConn, error) {
 	conn.status = SynRecv
 	// Send Syn Ack
 	ln.d.ConnTable[key] = conn
-	_, err := conn.sendFlags(conn.tcb.iss, uint32(conn.tcb.rcvNxt), SYN+ACK)
+	_, err := conn.sendFlags(conn.tcb.iss, conn.tcb.wrapFromIrs(conn.tcb.rcvNxt), SYN+ACK)
 	if err != nil {
 		return nil, err
 	}

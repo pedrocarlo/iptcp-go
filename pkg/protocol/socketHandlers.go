@@ -56,6 +56,7 @@ func handleSynSentState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 			return errIncorrectAck
 		}
 		if !conn.isAckAcceptable(hdr.AckNum) {
+			println("syssent not acceptable ack")
 			return errInvalidAck
 		}
 		// ACK + RST
@@ -66,21 +67,22 @@ func handleSynSentState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 	}
 	// Bad design should try to process the SYN + ACK on the first part
 	if flags&SYN == SYN {
-		conn.tcb.rcvNxt = hdr.SeqNum + 1
+		conn.tcb.rcvNxt = 1
 		conn.tcb.rcvLbr = conn.tcb.rcvNxt
 		conn.tcb.irs = hdr.SeqNum
 		conn.tcb.sendWnd = hdr.WindowSize
 		if flags&ACK == ACK {
-			conn.tcb.sendUna = hdr.AckNum
+			dist := wrappedDist(conn.tcb.wrapFromIss(conn.tcb.sendUna), hdr.AckNum)
+			conn.tcb.sendUna += uint64(dist)
 			// segments on the retransmission queue that are thereby acknowledged
 			// should be removed
 			conn.status = Established
 			conn.signalChannel <- true
-			_, err := conn.sendAck(uint32(conn.tcb.sendNxt), uint32(conn.tcb.rcvNxt))
+			_, err := conn.sendAck(conn.tcb.wrapFromIss(conn.tcb.sendNxt), conn.tcb.wrapFromIrs(conn.tcb.rcvNxt))
 			return err
 		}
 		// Becomes the listener now?
-		conn.sendFlags(conn.tcb.iss, uint32(conn.tcb.rcvNxt), SYN+ACK)
+		conn.sendFlags(conn.tcb.iss, conn.tcb.wrapFromIrs(conn.tcb.rcvNxt), SYN+ACK)
 		conn.status = SynRecv
 	}
 	conn.signalChannel <- true
@@ -129,12 +131,15 @@ func handleEstablished(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 	conn.tcb.sendWnd = hdr.WindowSize
 	ackNum := hdr.SeqNum
 	var err error = nil
+	wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
+	wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
+	wrappedSendUna := conn.tcb.wrapFromIss(conn.tcb.sendUna)
 	// Should probably check for rst before ack
 	// Be mindful of early arrivals and see what to do with them
 	if conn.isSegmentAcceptable(hdr.SeqNum, uint32(len(tcpPacket.Payload))) {
 		// TODO Check RST later
 		if flags&RST == RST {
-			if hdr.SeqNum == conn.tcb.rcvNxt {
+			if hdr.SeqNum == wrappedRcvNxt {
 				conn.sendRst(ackNum)
 				conn.VClose()
 				// Maybe see later
@@ -149,15 +154,15 @@ func handleEstablished(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 				//
 				if len(tcpPacket.Payload) > 0 {
 					conn.tcb.AddRead(tcpPacket.Payload)
-					_, err = conn.sendAck(conn.tcb.sendNxt, ackNum+uint32(len(tcpPacket.Payload)))
+					_, err = conn.sendAck(wrappedSendNxt, ackNum+uint32(len(tcpPacket.Payload)))
 				}
 				// TODO see what should be correct SeqNum here
-			} else if hdr.AckNum <= conn.tcb.sendUna {
+			} else if hdr.AckNum <= wrappedSendUna {
 				return nil
-			} else if hdr.AckNum > conn.tcb.sendNxt {
-				_, err = conn.sendAck(conn.tcb.sendNxt, conn.tcb.rcvNxt)
+			} else if hdr.AckNum > wrappedSendNxt {
+				_, err = conn.sendAck(wrappedSendNxt, wrappedSendNxt)
 				return err
-			} else if conn.tcb.sendUna <= hdr.AckNum && hdr.AckNum <= conn.tcb.sendNxt {
+			} else if wrappedSendUna <= hdr.AckNum && hdr.AckNum <= wrappedSendNxt {
 				// Update sendWnd
 				wl1, wl2 := conn.tcb.sendWl1, conn.tcb.sendWl2
 				if wl1 < hdr.SeqNum || (wl1 == hdr.SeqNum && wl2 <= hdr.AckNum) {
@@ -181,7 +186,7 @@ func handleEstablished(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 		if flags&RST == RST {
 			return nil
 		}
-		_, err = conn.send(conn.tcb.sendNxt, conn.tcb.rcvNxt, ACK, make([]byte, 0))
+		_, err = conn.send(wrappedSendNxt, wrappedRcvNxt, ACK, make([]byte, 0))
 		return err
 	}
 	return err

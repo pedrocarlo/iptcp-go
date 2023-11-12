@@ -99,7 +99,11 @@ func (conn *VTcpConn) VWrite(data []byte) (int, error) {
 			conn.tcb.AddSend(segData)
 			// Data send should always be <=Mss size if segData < MSS
 			dataSend := conn.tcb.ReadSend()
-			n, err := conn.send(conn.tcb.sendNxt-uint32(len(dataSend)), conn.tcb.rcvNxt, ACK, dataSend)
+			n, err := conn.send(
+				conn.tcb.wrapFromIss(conn.tcb.sendNxt)-uint32(len(dataSend)),
+				conn.tcb.wrapFromIrs(conn.tcb.rcvNxt),
+				ACK,
+				dataSend)
 			bytesSent += n
 			if err != nil {
 				return bytesSent, err
@@ -201,20 +205,24 @@ func (conn *VTcpConn) sendRst(ackNum uint32) (int, error) {
 
 // Ack is correct if it references values whithin the bounds of ISS and SND.NXT pointer
 func (conn *VTcpConn) isAckCorrectBound(ackNum uint32) bool {
-	return !(ackNum <= conn.tcb.iss || ackNum > uint32(conn.tcb.sendNxt))
+	return !(ackNum <= conn.tcb.iss || ackNum > conn.tcb.wrapFromIss(conn.tcb.sendNxt))
 }
 
 // TODO ignoring edge case when number overflows or sequence wraps
 func (conn *VTcpConn) isAckAcceptable(ackNum uint32) bool {
 	// println("sendUNa", conn.tcb.sendUna, "AckNum", ackNum, "SendNxt", conn.tcb.sendNxt)
-	return conn.tcb.sendUna < ackNum && ackNum <= conn.tcb.sendNxt
+	wrappedUna := conn.tcb.wrapFromIss(conn.tcb.sendUna)
+	wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
+	return wrappedUna < ackNum && ackNum <= wrappedSendNxt
 }
 
 func (conn *VTcpConn) isSegmentAcceptable(seqNum uint32, lenData uint32) bool {
+	wrappedRCVNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
 	if lenData == 0 && conn.tcb.rcvWnd == 0 {
-		return seqNum == conn.tcb.rcvNxt
+		return seqNum == wrappedRCVNxt
 	}
-	startSegmentInWnd := conn.tcb.rcvNxt <= seqNum && seqNum < conn.tcb.rcvNxt+uint32(conn.tcb.rcvWnd)
+	// TODO this comparison can wrap be careful here
+	startSegmentInWnd := wrappedRCVNxt <= seqNum && seqNum < wrappedRCVNxt+uint32(conn.tcb.rcvWnd)
 	if lenData == 0 && conn.tcb.rcvWnd > 0 {
 		return startSegmentInWnd
 	}
@@ -222,7 +230,8 @@ func (conn *VTcpConn) isSegmentAcceptable(seqNum uint32, lenData uint32) bool {
 		return false
 	}
 	endSegmentNum := seqNum + lenData - 1
-	endSegmentInWnd := conn.tcb.rcvNxt <= endSegmentNum && endSegmentNum < conn.tcb.rcvNxt+uint32(conn.tcb.rcvWnd)
+	// TODO this comparison can wrap be careful here
+	endSegmentInWnd := wrappedRCVNxt <= endSegmentNum && endSegmentNum < wrappedRCVNxt+uint32(conn.tcb.rcvWnd)
 	return startSegmentInWnd || endSegmentInWnd
 }
 

@@ -15,21 +15,21 @@ type TCB struct {
 	iss     uint32
 	sendBuf []byte
 	// Oldest Unacked Segment
-	sendUna uint32
+	sendUna uint64
 	// Next Byte Send
-	sendNxt uint32
+	sendNxt uint64
 	// Last Byte Read from Send Buffer
-	sendLbr uint32
+	sendLbr uint64
 	// Current size of the opposing window
 	sendWnd uint16
 	sendWl1 uint32
 	sendWl2 uint32
 	rcvBuf  []byte
 	// Next Byte Read
-	rcvNxt uint32
+	rcvNxt uint64
 	rcvWnd uint16
 	// Last Byte Read from Receive Buffer
-	rcvLbr           uint32
+	rcvLbr           uint64
 	ackedBytesMap    map[uint]bool
 	windowSendSignal chan uint16
 	dataToSendSignal chan []byte
@@ -64,8 +64,8 @@ func createTCB() *TCB {
 	tcb.sendMutex = sync.Mutex{}
 	tcb.recvMutex = sync.Mutex{}
 	tcb.iss = rand.Uint32()
-	tcb.sendUna = tcb.iss
-	tcb.sendNxt = tcb.iss + 1
+	tcb.sendUna = 0
+	tcb.sendNxt = 1
 	tcb.sendLbr = tcb.sendNxt
 	tcb.rcvWnd = uint16(tcbSize)
 
@@ -84,7 +84,7 @@ func (tcb *TCB) setSynReceivedState(irs uint32, ackNum uint32, window uint16) {
 	tcb.sendWl1 = irs
 	tcb.sendWl2 = ackNum
 
-	tcb.rcvNxt = irs + 1
+	tcb.rcvNxt = 1
 	tcb.rcvLbr = tcb.rcvNxt
 	tcb.sendWnd = window
 }
@@ -93,6 +93,22 @@ func (tcb *TCB) setSynReceivedState(irs uint32, ackNum uint32, window uint16) {
 func (tcb *TCB) advertiseWindowSize() uint16 {
 	// For now return a constant
 	return tcb.rcvWnd
+}
+
+// Distance between 2 uint32 num
+// Invariant is that numbers can never be ahead of each other more than tcbsize
+// As they cannot send more than tcbsize of information
+func wrappedDist(num1 uint32, num2 uint32) uint32 {
+	dist := min(num1-num2, uint32(tcbSize))
+	return dist
+}
+
+func (tcb *TCB) wrapFromIss(pointer uint64) uint32 {
+	return uint32(uint64(tcb.iss) + pointer)
+}
+
+func (tcb *TCB) wrapFromIrs(pointer uint64) uint32 {
+	return uint32(uint64(tcb.irs) + pointer)
 }
 
 func wrapIndex(idx uint) uint {
@@ -213,7 +229,7 @@ func (tcb *TCB) ReadSend() []byte {
 func (tcb *TCB) readFromSend() []byte {
 	tcb.sendMutex.Lock()
 	// Ignoring wrap around for uint32 nums here
-	dist := min(tcb.sendNxt-tcb.sendLbr, uint32(Mss))
+	dist := min(tcb.sendNxt-tcb.sendLbr, uint64(Mss))
 	buf := make([]byte, 0)
 	minIdx := wrapIndex(uint(tcb.sendLbr) + uint(dist))
 	startIdx := wrapIndex(uint(tcb.sendLbr))
@@ -224,7 +240,7 @@ func (tcb *TCB) readFromSend() []byte {
 	} else {
 		buf = append(buf, tcb.sendBuf[startIdx:minIdx]...)
 	}
-	tcb.sendLbr += uint32(len(buf))
+	tcb.sendLbr += uint64(len(buf))
 	tcb.sendWnd += max(uint16(len(buf)), uint16(tcbSize)-tcb.sendWnd)
 	tcb.sendMutex.Unlock()
 	// Signal here window space was freed
@@ -269,7 +285,7 @@ func (tcb *TCB) ReadRecv(count uint32) []byte {
 func (tcb *TCB) readFromRecv(count uint32) []byte {
 	tcb.recvMutex.Lock()
 	// Ignoring wrap around for uint32 nums here
-	dist := min(tcb.rcvNxt-tcb.rcvLbr, count)
+	dist := min(tcb.rcvNxt-tcb.rcvLbr, uint64(count))
 	buf := make([]byte, 0)
 	minIdx := wrapIndex(uint(tcb.rcvLbr) + uint(dist))
 	startIdx := wrapIndex(uint(tcb.rcvLbr))
@@ -280,7 +296,7 @@ func (tcb *TCB) readFromRecv(count uint32) []byte {
 	} else {
 		buf = append(buf, tcb.rcvBuf[startIdx:minIdx]...)
 	}
-	tcb.rcvLbr += uint32(len(buf))
+	tcb.rcvLbr += uint64(len(buf))
 	// TODO see if this breaks anything
 	tcb.rcvWnd += uint16(len(buf))
 	// tcb.rcvWnd += min(uint16(len(buf)), uint16(tcbSize)-tcb.rcvWnd)
