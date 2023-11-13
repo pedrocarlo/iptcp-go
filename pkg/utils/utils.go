@@ -45,6 +45,7 @@ func initialize() CommandMap {
 	commandMap["ls"] = ListSockets
 	commandMap["s"] = SendTcp
 	commandMap["r"] = ReceiveTcp
+	commandMap["cl"] = CloseSocket
 
 	return commandMap
 }
@@ -315,6 +316,7 @@ func ListSockets(d *protocol.Device, _ []string, socketIds *SocketIds) {
 	w.Flush()
 }
 
+// TODO block commands from executing when not in established state
 func SendTcp(d *protocol.Device, args []string, socketIds *SocketIds) {
 	if len(args) < 2 {
 		println("usage: s <socket ID> <bytes>")
@@ -334,6 +336,7 @@ func SendTcp(d *protocol.Device, args []string, socketIds *SocketIds) {
 	fmt.Printf("Wrote %d bytes\n", n)
 }
 
+// TODO block commands from executing when not in established state
 func ReceiveTcp(d *protocol.Device, args []string, socketIds *SocketIds) {
 	if len(args) < 2 {
 		println("usage: r <socketID> <numbytes>")
@@ -346,6 +349,7 @@ func ReceiveTcp(d *protocol.Device, args []string, socketIds *SocketIds) {
 		return
 	}
 	numBytes, err := strconv.Atoi(numBytesStr)
+	// Throw error if num is negative
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -357,6 +361,25 @@ func ReceiveTcp(d *protocol.Device, args []string, socketIds *SocketIds) {
 		return
 	}
 	fmt.Printf("Read %d bytes: %s\n", n, buf[:n])
+}
+
+func CloseSocket(d *protocol.Device, args []string, socketIds *SocketIds) {
+	if len(args) < 1 {
+		println("usage: cl <socket ID>")
+		return
+	}
+	socketIdStr := args[0]
+	conn, err := getSocket(socketIdStr, d, socketIds)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	err = conn.VClose()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	updataSocketIds(d, socketIds)
 }
 
 func getSocket(idStr string, d *protocol.Device, socketIds *SocketIds) (*protocol.VTcpConn, error) {

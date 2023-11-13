@@ -67,13 +67,14 @@ func (ln *VTcpListener) VAccept() (*VTcpConn, error) {
 		// conn.tcb.initializeControllers()
 	// TODO See correct timeout way of doing it
 	case <-time.NewTimer(time.Second).C:
-		conn.VClose()
+		conn.closeDelete()
 		return nil, errTimeout
 	}
 	return conn, nil
 }
 
 func (ln *VTcpListener) VClose() error {
+	ln.status = Closed
 	return nil
 }
 

@@ -99,6 +99,9 @@ func (tcb *TCB) advertiseWindowSize() uint16 {
 // Invariant is that numbers can never be ahead of each other more than tcbsize
 // As they cannot send more than tcbsize of information
 func wrappedDist(num1 uint32, num2 uint32) uint32 {
+	if num1 < num2 {
+		num1, num2 = num2, num1
+	}
 	dist := min(num1-num2, uint32(tcbSize))
 	return dist
 }
@@ -269,6 +272,7 @@ func (tcb *TCB) add2Read(payload []byte) {
 	for _, b := range payload {
 		tcb.rcvBuf[count] = b
 		count = wrapIndex(count + 1)
+		// Inneficient just do one calculation after TODO
 		tcb.rcvNxt++
 		tcb.rcvWnd--
 	}

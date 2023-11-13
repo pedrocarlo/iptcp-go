@@ -4,6 +4,7 @@ import (
 	tcpheader "iptcp-pedrocarlo/pkg/tcp-headers"
 	"math/rand"
 	"net/netip"
+	"sync"
 	"time"
 
 	ipv4header "github.com/brown-csci1680/iptcp-headers"
@@ -18,6 +19,7 @@ type VTcpConn struct {
 	status        Status
 	tcb           TCB
 	signalChannel chan bool
+	mutex         sync.Mutex
 }
 
 /* Start Normal Socket Api */
@@ -32,6 +34,7 @@ func (d *Device) CreateSocket(remoteAddrPort netip.AddrPort, localPort uint16) *
 		listenChannel: make(chan tcpheader.TcpPacket),
 		status:        Closed,
 		signalChannel: make(chan bool),
+		mutex:         sync.Mutex{},
 	}
 }
 
@@ -69,7 +72,7 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 		// CALL VCLOSE
 		// TIMEOUT THREE ACKS HERE
 		println("timeout")
-		conn.VClose()
+		conn.closeDelete()
 		return nil, errTimeout
 	}
 }
@@ -121,10 +124,34 @@ func (conn *VTcpConn) VWrite(data []byte) (int, error) {
 	return bytesSent, nil
 }
 
-// For now just say closed
+// For now just say Finwait1
 func (conn *VTcpConn) VClose() error {
+	wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
+	wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
+	var err error = nil
+	// TODO Mutex this operation?
+	switch conn.status {
+	case SynSent:
+		conn.status = Closed
+	case FinWait2:
+		err = errClosing
+	case TimeWait:
+		err = errClosing
+	case CloseWait:
+		conn.status = LastAck
+		conn.tcb.sendNxt++
+		_, err = conn.sendFlags(wrappedSendNxt, wrappedRcvNxt, FIN+ACK)
+	default:
+		conn.status = FinWait1
+		conn.tcb.sendNxt++
+		_, err = conn.sendFlags(wrappedSendNxt, wrappedRcvNxt, FIN+ACK)
+	}
+	return err
+}
+
+func (conn *VTcpConn) closeDelete() {
 	conn.status = Closed
-	return nil
+	delete(conn.d.ConnTable, SocketKeyFromSocketInterface(conn))
 }
 
 // TODO should make this private later
@@ -148,7 +175,6 @@ func (conn *VTcpConn) CreateTcpPacket(seqNum uint32, ackNum uint32, flags uint8,
 }
 
 func (conn *VTcpConn) SendSynchronized(payload []byte) {
-
 }
 
 func (d *Device) SendTcp(dst netip.Addr, tcpPacket tcpheader.TcpPacket) (int, error) {
@@ -208,7 +234,7 @@ func (conn *VTcpConn) isAckCorrectBound(ackNum uint32) bool {
 	return !(ackNum <= conn.tcb.iss || ackNum > conn.tcb.wrapFromIss(conn.tcb.sendNxt))
 }
 
-// TODO ignoring edge case when number overflows or sequence wraps
+// SND.UNA < SEG.ACK <= SND.NXT
 func (conn *VTcpConn) isAckAcceptable(ackNum uint32) bool {
 	// println("sendUNa", conn.tcb.sendUna, "AckNum", ackNum, "SendNxt", conn.tcb.sendNxt)
 	wrappedUna := conn.tcb.wrapFromIss(conn.tcb.sendUna)
