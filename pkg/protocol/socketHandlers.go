@@ -8,6 +8,7 @@ import (
 // Handles receiving packets on normal socket
 func handleConnStatus(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 	var err error = nil
+	conn.mutex.Lock()
 	switch conn.status {
 	case Closed:
 	case Listen:
@@ -16,6 +17,7 @@ func handleConnStatus(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 	default:
 		err = handleOtherStates(conn, tcpPacket)
 	}
+	conn.mutex.Unlock()
 	return err
 }
 
@@ -102,45 +104,6 @@ func handleSynSentState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 	return nil
 }
 
-// Came from Active Open
-func handleSynRecvState(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
-	flags := tcpPacket.TcpHdr.Flags
-	hdr := tcpPacket.TcpHdr
-	wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
-	wrappedSendUna := conn.tcb.wrapFromIss(conn.tcb.sendUna)
-	if flags&RST == RST {
-		conn.signalChannel <- false
-		conn.closeDelete()
-		return errConnectionReset
-	}
-	// TODO WHAT TO DO HERE DO NOT UNDERSTAND WHAT RFC WANTS
-	if flags&SYN == SYN {
-		// I do not think we follow RFC 5961
-		// If SYN in the window -> send RST
-		// Connection reset flush everything else
-		return nil
-	}
-	if flags&ACK == ACK {
-		err := handleAckOtherStates(conn, tcpPacket)
-		if err != nil {
-			return err
-		}
-		if wrappedSendUna <= hdr.AckNum && hdr.AckNum <= wrappedSendNxt {
-			conn.status = Established
-			conn.tcb.sendWnd = hdr.WindowSize
-			conn.tcb.sendWl1 = hdr.SeqNum
-			conn.tcb.sendWl2 = hdr.AckNum
-		} else {
-			println("sending reset synrecv")
-			conn.sendRst(hdr.AckNum)
-			conn.signalChannel <- false
-		}
-		conn.signalChannel <- true
-
-	}
-	return nil
-}
-
 // Section 3.4 retransmission of acceptable ack
 // For now just focus on ACK
 // TODO Check for SYN BIT AND RST
@@ -173,17 +136,37 @@ func handleOtherStates(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 					conn.signalChannel <- true
 				}
 			}
-			err := handleAckOtherStates(conn, tcpPacket)
-			if err != nil {
-				// Dropping segment here
+			switch conn.status {
+			case TimeWait:
+				// See if I need to do this
+				if flags&FIN == FIN {
+					// restart timer
+				}
+			case LastAck:
+				// Sets status to closed and deletes tcb
+				conn.closeDelete()
 				return nil
+			default:
+				err := handleAckOtherStates(conn, tcpPacket)
+				if err != nil {
+					// Dropping segment here
+					return nil
+				}
 			}
 		}
 		// Process the segment
-		if len(tcpPacket.Payload) > 0 {
-			conn.tcb.AddRead(tcpPacket.Payload)
-			conn.sendAck(wrappedSendNxt, ackNum+uint32(len(tcpPacket.Payload)))
+		switch conn.status {
+		case Established:
+			fallthrough
+		case FinWait1:
+			fallthrough
+		case FinWait2:
+			if len(tcpPacket.Payload) > 0 {
+				conn.tcb.AddRead(tcpPacket.Payload)
+				conn.sendAck(wrappedSendNxt, ackNum+uint32(len(tcpPacket.Payload)))
+			}
 		}
+
 		if flags&FIN == FIN {
 			handleFinOtherStates(conn, tcpPacket)
 			return nil
@@ -193,6 +176,8 @@ func handleOtherStates(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error {
 			return nil
 		}
 		// Window probe
+		wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
+		wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
 		_, err = conn.send(wrappedSendNxt, wrappedRcvNxt, ACK, make([]byte, 0))
 		return err
 	}
@@ -204,9 +189,11 @@ func handleAckOtherStates(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error 
 	hdr := tcpPacket.TcpHdr
 	wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
 	wrappedSendUna := conn.tcb.wrapFromIss(conn.tcb.sendUna)
+	wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
+
 	// SND.UNA < SEG.ACK =< SND.NXT
-	println("Curr Ack", hdr.AckNum)
-	println("Curr SendNxt", wrappedSendNxt)
+	// println("Curr Ack", hdr.AckNum)
+	// println("Curr SendNxt", wrappedSendNxt)
 	if conn.isAckAcceptable(hdr.AckNum) {
 		// Acknowledge segments in retransmission queue
 		// Early arrivals put in a min heap for queing
@@ -226,7 +213,7 @@ func handleAckOtherStates(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) error 
 		}
 	} else if hdr.AckNum <= wrappedSendUna {
 	} else if hdr.AckNum > wrappedSendNxt {
-		conn.sendAck(wrappedSendNxt, wrappedSendNxt)
+		conn.sendAck(wrappedSendNxt, wrappedRcvNxt)
 		// Drop Segment
 		return errInvalidAck
 	}
@@ -248,13 +235,12 @@ func handleFinOtherStates(conn *VTcpConn, tcpPacket *tcpheader.TcpPacket) {
 	hdr := tcpPacket.TcpHdr
 	wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
 	wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
-	println("Prev RCV NXT", wrappedRcvNxt)
+	// println("Prev RCV NXT", wrappedRcvNxt)
 	seqDist := wrappedDist(wrappedRcvNxt, hdr.SeqNum+1)
 	conn.tcb.rcvNxt += uint64(seqDist)
 	wrappedRcvNxt = conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
-	println("After RCV NXT", wrappedRcvNxt)
-	println("Seq Num + 1", hdr.SeqNum+1)
-
+	// println("After RCV NXT", wrappedRcvNxt)
+	// println("Seq Num + 1", hdr.SeqNum+1)
 	conn.sendAck(wrappedSendNxt, wrappedRcvNxt)
 	switch conn.status {
 	case Established:

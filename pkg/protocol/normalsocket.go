@@ -130,6 +130,7 @@ func (conn *VTcpConn) VClose() error {
 	wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
 	var err error = nil
 	// TODO Mutex this operation?
+	conn.mutex.Lock()
 	switch conn.status {
 	case SynSent:
 		conn.status = Closed
@@ -146,6 +147,7 @@ func (conn *VTcpConn) VClose() error {
 		conn.tcb.sendNxt++
 		_, err = conn.sendFlags(wrappedSendNxt, wrappedRcvNxt, FIN+ACK)
 	}
+	conn.mutex.Unlock()
 	return err
 }
 
@@ -172,9 +174,6 @@ func (conn *VTcpConn) CreateTcpPacket(seqNum uint32, ackNum uint32, flags uint8,
 	hdr.Checksum = checksum
 
 	return tcpheader.TcpPacket{TcpHdr: hdr, Payload: payload}
-}
-
-func (conn *VTcpConn) SendSynchronized(payload []byte) {
 }
 
 func (d *Device) SendTcp(dst netip.Addr, tcpPacket tcpheader.TcpPacket) (int, error) {
