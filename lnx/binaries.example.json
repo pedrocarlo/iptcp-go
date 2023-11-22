@@ -6,6 +6,7 @@
         "binary_path": "./reference/arm64/vhost"
     },
     "r1": {
-        "binary_path": "./vrouter"
+        "binary_path": "./reference/arm64/vrouter",
+        "extra_args": "--drop 0.1"
     }
 }

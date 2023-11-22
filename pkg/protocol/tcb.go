@@ -3,6 +3,7 @@ package protocol
 import (
 	"math/rand"
 	"sync"
+	"time"
 )
 
 // TODO TODO Change implementation where pointers numbers are just added to IRS or ISS so they cannot wrap around in a normal connection state
@@ -41,6 +42,7 @@ type TCB struct {
 	bytesReadSend    chan []byte
 	sendMutex        sync.Mutex
 	recvMutex        sync.Mutex
+	windowProbeChan  chan []byte
 }
 
 const (
@@ -63,6 +65,7 @@ func createTCB() *TCB {
 	tcb.bytesReadSend = make(chan []byte)
 	tcb.sendMutex = sync.Mutex{}
 	tcb.recvMutex = sync.Mutex{}
+	tcb.windowProbeChan = make(chan []byte)
 	tcb.iss = rand.Uint32()
 	tcb.sendUna = 0
 	tcb.sendNxt = 1
@@ -95,6 +98,11 @@ func (tcb *TCB) advertiseWindowSize() uint16 {
 	return tcb.rcvWnd
 }
 
+// BUF TCBSIZE - (SND.NXT - SND.UNA)
+func (tcb *TCB) getSendCapacity() uint16 {
+	return uint16(tcbSize) - (uint16(wrappedDist(uint32(tcb.sendNxt), uint32(tcb.sendUna))))
+}
+
 // Distance between 2 uint32 num
 // Invariant is that numbers can never be ahead of each other more than tcbsize
 // As they cannot send more than tcbsize of information
@@ -104,6 +112,18 @@ func wrappedDist(num1 uint32, num2 uint32) uint32 {
 	}
 	dist := min(num1-num2, uint32(tcbSize))
 	return dist
+}
+
+// Java compareTo style
+func wrappedCompare(num1 uint32, num2 uint32) int {
+	dist := wrappedDist(num1, num2)
+	if dist == 0 {
+		return 0
+	} else if num1+dist == num2 {
+		return -1 // Num1 is smaller
+	} else {
+		return 1
+	}
 }
 
 func (tcb *TCB) wrapFromIss(pointer uint64) uint32 {
@@ -122,6 +142,7 @@ func (tcb *TCB) tcbReadController() {
 	for {
 		select {
 		case payload := <-tcb.dataToRecvSignal:
+			tcb.recvMutex.Lock()
 			for tcb.rcvWnd < uint16(len(payload)) {
 				// Wait for some read to clear some buf size
 				<-tcb.windowRecvSignal
@@ -131,7 +152,9 @@ func (tcb *TCB) tcbReadController() {
 			case tcb.windowRecvSignal <- tcb.rcvWnd:
 			default:
 			}
+			tcb.recvMutex.Unlock()
 		case bytesToRead := <-tcb.bytesToRead:
+			tcb.recvMutex.Lock()
 			for tcb.rcvWnd == uint16(tcbSize) {
 				// Wait for some add to decrease windows size
 				<-tcb.windowRecvSignal
@@ -141,66 +164,72 @@ func (tcb *TCB) tcbReadController() {
 			case tcb.windowRecvSignal <- tcb.rcvWnd:
 			default:
 			}
+			tcb.recvMutex.Unlock()
 		}
 	}
 }
-
-// func (tcb *TCB) tcbReadBufController() {
-// 	for {
-// 		bytesToRead := <-tcb.bytesToRead
-// 		for tcb.rcvWnd == uint16(tcbSize) {
-// 			// Wait for some add to decrease windows size
-// 			<-tcb.windowRecvSignal
-// 		}
-// 		tcb.bytesReadRcv <- tcb.readFromRecv(uint32(bytesToRead))
-// 		select {
-// 		case tcb.windowRecvSignal <- tcb.rcvWnd:
-// 		default:
-// 		}
-// 	}
-// }
 
 func (tcb *TCB) tcbSendController() {
 	for {
 		select {
 		case payload := <-tcb.dataToSendSignal:
-			for tcb.sendWnd < uint16(len(payload)) {
-				// Wait for some read to clear some buf size
+			// firstByte := payload[:1]
+			tcb.sendMutex.Lock()
+			println("CAP", tcb.getSendCapacity(), "Len Payload:", uint16(len(payload)))
+			for tcb.getSendCapacity() < uint16(len(payload)) {
 				<-tcb.windowSendSignal
 			}
 			tcb.add2Send(payload)
+			// println("sendwindows before add:", tcb.sendWnd)
+			// println("sendwindows after add:", tcb.sendWnd)
 			select {
-			case tcb.windowSendSignal <- tcb.sendWnd:
+			case tcb.windowSendSignal <- tcb.getSendCapacity():
 			default:
 			}
-		case <-tcb.bytesToSend:
-			for tcb.sendWnd == uint16(tcbSize) {
+			tcb.sendMutex.Unlock()
+
+		case numBytesToSend := <-tcb.bytesToSend:
+			tcb.sendMutex.Lock()
+			firstByte := make([]byte, 0)
+			windowProbe := false
+			if tcb.sendWnd == 0 {
+				firstByte = append(firstByte, tcb.readFromSend(1)...)
+				windowProbe = true
+			}
+			for tcb.getSendCapacity() == uint16(tcbSize) || tcb.sendWnd == 0 {
+				// Window Probe
+				if tcb.getSendCapacity() == uint16(tcbSize) {
+					<-tcb.windowSendSignal
+				} else if tcb.sendWnd == 0 {
+					// println("CAP", tcb.getSendCapacity(), "Len Payload:", uint16(len(payload)))
+					// println("STUCK")
+					// println("SEND WND:", tcb.sendWnd, "Send UNA:", tcb.sendUna, "Send Nxt:", tcb.sendNxt)
+					select {
+					case tcb.windowProbeChan <- firstByte:
+					default:
+					}
+					select {
+					case <-time.NewTimer(time.Second).C:
+					case <-tcb.windowSendSignal:
+					}
+				}
+				// Wait for some read to clear some buf size
 				// Wait for someone to decrease windows size
-				<-tcb.windowSendSignal
 			}
-			tcb.bytesReadSend <- tcb.readFromSend()
+			if windowProbe {
+				numBytesToSend--
+			}
+			// numBytesToRead := min(uint32(tcb.sendWnd), uint32(numBytesToSend))
+			numBytesToRead := uint32(numBytesToSend)
+			tcb.bytesReadSend <- tcb.readFromSend(numBytesToRead)
 			select {
-			case tcb.windowSendSignal <- tcb.sendWnd:
+			case tcb.windowSendSignal <- tcb.getSendCapacity():
 			default:
 			}
+			tcb.sendMutex.Unlock()
 		}
 	}
 }
-
-// func (tcb *TCB) tcbSendBufController() {
-// 	for {
-// 		<-tcb.bytesToSend
-// 		for tcb.sendWnd == uint16(tcbSize) {
-// 			// Wait for some add to decrease windows size
-// 			<-tcb.windowSendSignal
-// 		}
-// 		tcb.bytesReadSend <- tcb.readFromSend()
-// 		select {
-// 		case tcb.windowSendSignal <- tcb.sendWnd:
-// 		default:
-// 		}
-// 	}
-// }
 
 func (tcb *TCB) AddSend(payload []byte) {
 	tcb.dataToSendSignal <- payload
@@ -212,27 +241,23 @@ func (tcb *TCB) add2Send(payload []byte) {
 
 	// See if need to just be iterating over this
 	// Use windowProbing chan to block when cannot send
-	tcb.sendMutex.Lock()
 	count := wrapIndex(uint(tcb.sendNxt))
 	for _, b := range payload {
 		tcb.sendBuf[count] = b
 		count = wrapIndex(count + 1)
 		tcb.sendNxt++
-		tcb.sendWnd--
 	}
-	tcb.sendMutex.Unlock()
 }
 
-func (tcb *TCB) ReadSend() []byte {
-	tcb.bytesToSend <- 0
+func (tcb *TCB) ReadSend(numBytes uint) []byte {
+	tcb.bytesToSend <- numBytes
 	data := <-tcb.bytesReadSend
 	return data
 }
 
-func (tcb *TCB) readFromSend() []byte {
-	tcb.sendMutex.Lock()
+func (tcb *TCB) readFromSend(count uint32) []byte {
 	// Ignoring wrap around for uint32 nums here
-	dist := min(tcb.sendNxt-tcb.sendLbr, uint64(Mss))
+	dist := min(tcb.sendNxt-tcb.sendLbr, uint64(Mss), uint64(count))
 	buf := make([]byte, 0)
 	minIdx := wrapIndex(uint(tcb.sendLbr) + uint(dist))
 	startIdx := wrapIndex(uint(tcb.sendLbr))
@@ -244,11 +269,10 @@ func (tcb *TCB) readFromSend() []byte {
 		buf = append(buf, tcb.sendBuf[startIdx:minIdx]...)
 	}
 	tcb.sendLbr += uint64(len(buf))
-	tcb.sendWnd += max(uint16(len(buf)), uint16(tcbSize)-tcb.sendWnd)
-	tcb.sendMutex.Unlock()
+	// tcb.sendWnd += max(uint16(len(buf)), uint16(tcbSize)-tcb.sendWnd)
 	// Signal here window space was freed
 	select {
-	case tcb.windowRecvSignal <- tcb.rcvWnd:
+	case tcb.windowSendSignal <- tcb.sendWnd:
 	default:
 	}
 	return buf
@@ -266,7 +290,6 @@ func (tcb *TCB) add2Read(payload []byte) {
 	// TODO
 	// Question here on queue the add2Read because multiple calls
 	// could be made but recvSignal could activate for another goroutine first?
-	tcb.recvMutex.Lock()
 	// println("start rcvnxt", tcb.rcvNxt)
 	count := wrapIndex(uint(tcb.rcvNxt))
 	for _, b := range payload {
@@ -277,7 +300,6 @@ func (tcb *TCB) add2Read(payload []byte) {
 		tcb.rcvWnd--
 	}
 	// println("end rcvnxt", tcb.rcvNxt)
-	tcb.recvMutex.Unlock()
 }
 
 func (tcb *TCB) ReadRecv(count uint32) []byte {
@@ -287,7 +309,6 @@ func (tcb *TCB) ReadRecv(count uint32) []byte {
 }
 
 func (tcb *TCB) readFromRecv(count uint32) []byte {
-	tcb.recvMutex.Lock()
 	// Ignoring wrap around for uint32 nums here
 	dist := min(tcb.rcvNxt-tcb.rcvLbr, uint64(count))
 	buf := make([]byte, 0)
@@ -304,7 +325,6 @@ func (tcb *TCB) readFromRecv(count uint32) []byte {
 	// TODO see if this breaks anything
 	tcb.rcvWnd += uint16(len(buf))
 	// tcb.rcvWnd += min(uint16(len(buf)), uint16(tcbSize)-tcb.rcvWnd)
-	tcb.recvMutex.Unlock()
 	// Signal here window space was freed
 	select {
 	case tcb.windowRecvSignal <- tcb.rcvWnd:

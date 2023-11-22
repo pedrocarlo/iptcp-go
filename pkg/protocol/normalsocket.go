@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"fmt"
 	tcpheader "iptcp-pedrocarlo/pkg/tcp-headers"
 	"math/rand"
 	"net/netip"
@@ -9,6 +10,15 @@ import (
 
 	ipv4header "github.com/brown-csci1680/iptcp-headers"
 	"github.com/google/netstack/tcpip/header"
+)
+
+const (
+	// 5 seconds timeout
+	timeoutTimeWaitDuration = 5
+	ALPHA                   = 0.9
+	BETA                    = 1.5
+	UBOUND                  = time.Duration(time.Second * 15) // 30 seconds
+	LBOUND                  = time.Duration(time.Second * 1)  // 5 seconds
 )
 
 type VTcpConn struct {
@@ -20,6 +30,10 @@ type VTcpConn struct {
 	tcb           TCB
 	signalChannel chan bool
 	mutex         sync.Mutex
+	timeWaitTimer *time.Timer
+	rtoTimer      *time.Timer
+	srtt          float64
+	queue         rtoQueue
 }
 
 /* Start Normal Socket Api */
@@ -35,15 +49,18 @@ func (d *Device) CreateSocket(remoteAddrPort netip.AddrPort, localPort uint16) *
 		status:        Closed,
 		signalChannel: make(chan bool),
 		mutex:         sync.Mutex{},
+		rtoTimer:      nil,
+		srtt:          0,
+		queue:         make(rtoQueue, 0),
 	}
 }
 
 func (conn *VTcpConn) initializeTcb() {
 	conn.tcb = *createTCB()
 	conn.tcb.initializeControllers()
+	go conn.windowProbing()
 }
 
-// For now do not choose a random port
 // Should I account for a listen socket trying to initiate a connection?
 func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 	remoteAddrPort := netip.AddrPortFrom(addr, port)
@@ -57,51 +74,69 @@ func (d *Device) VConnect(addr netip.Addr, port uint16) (*VTcpConn, error) {
 	conn.initializeTcb()
 	key := SocketKeyFromSocketInterface(conn)
 	conn.d.ConnTable[key] = conn
-	_, err := conn.sendSyn()
 	conn.status = SynSent
+	_, err := conn.sendSyn()
 	if err != nil {
 		return nil, err
 	}
 	// Wait for SYN + ACK
-	select {
-	case <-conn.signalChannel:
-		// conn.tcb.initializeControllers()
-		return conn, nil
-	// FOR now just 3 seconds timeout change later
-	case <-time.NewTimer(time.Duration(time.Second * 3)).C:
-		// CALL VCLOSE
-		// TIMEOUT THREE ACKS HERE
-		println("timeout")
-		conn.closeDelete()
-		return nil, errTimeout
+	for i := 0; i < 4; i++ {
+		count := 3 * (i + 1)
+		select {
+		case <-conn.signalChannel:
+			return conn, nil
+		case <-time.NewTimer(time.Duration(time.Second * time.Duration(count))).C:
+			fmt.Printf("Trying to connect to %s\n", conn.remoteAddr)
+		}
 	}
+	// This will only happen if it times out
+	conn.closeDelete()
+	return nil, errTimeout
 }
 
 // Check rfc for all edge cases
 func (conn *VTcpConn) VRead(buf []byte) (int, error) {
 	bytesRead := 0
+	var err error = nil
 	switch conn.status {
+	case FinWait1:
+		fallthrough
+	case FinWait2:
+		fallthrough
+	case CloseWait:
+		fallthrough
 	case Established:
 		// Handler in the background adds to rcvBuf
 		dataRead := conn.tcb.ReadRecv(uint32(len(buf)))
 		copy(buf[:len(dataRead)], dataRead)
 		bytesRead += len(dataRead)
+	default:
+		err = errClosing
 	}
-	return bytesRead, nil
+	return bytesRead, err
 }
 
 func (conn *VTcpConn) VWrite(data []byte) (int, error) {
-	// Maybe just split up payload to be smaller the segment size here
 	bytesSent := 0
+	var err error = nil
 	// Segmenting data to be <= MSS
-	// Let tcb see if it can send that amount of data or not and block
-	for i := 0; i < len(data); i += int(Mss) {
-		segData := data[i:min(i+int(Mss), len(data))]
+	i := 0
+	for bytesSent < len(data) {
+		// println("Bytessent: ", bytesSent, "payload len:", len(data))
+		// conn.mutex.Lock()
+		cap := conn.tcb.getSendCapacity()
+		lastIdx := min(min(int(Mss), len(data)-bytesSent), int(cap))
+		// Avoiding sending packages with 0 information inside
+		if lastIdx == 0 {
+			lastIdx = 1
+		}
+		// println("i:", i, "last idx: ", lastIdx)
+		segData := data[i : i+lastIdx]
 		switch conn.status {
 		case Established:
 			conn.tcb.AddSend(segData)
 			// Data send should always be <=Mss size if segData < MSS
-			dataSend := conn.tcb.ReadSend()
+			dataSend := conn.tcb.ReadSend(uint(len(segData)))
 			n, err := conn.send(
 				conn.tcb.wrapFromIss(conn.tcb.sendNxt)-uint32(len(dataSend)),
 				conn.tcb.wrapFromIrs(conn.tcb.rcvNxt),
@@ -109,22 +144,25 @@ func (conn *VTcpConn) VWrite(data []byte) (int, error) {
 				dataSend)
 			bytesSent += n
 			if err != nil {
+				// conn.mutex.Unlock()
 				return bytesSent, err
 			}
-		case SynSent:
-			// Queue the data for transmission after entering ESTABLISHED state.
-			//If no space to queue, respond with "error: insufficient resources".
+			i += n
 		case CloseWait:
 			// Segmentize the buffer and send it with a piggybacked acknowledgment (acknowledgment value = RCV.NXT).
 			// If there is insufficient space to remember this buffer, simply return "error: insufficient resources".
-		case TimeWait:
+			// case TimeWait:
+			return 0, errClosing
+		default:
+			// TODO for now just do this
+			// conn.mutex.Unlock()
 			return 0, errClosing
 		}
+		// conn.mutex.Unlock()
 	}
-	return bytesSent, nil
+	return bytesSent, err
 }
 
-// For now just say Finwait1
 func (conn *VTcpConn) VClose() error {
 	wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
 	wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
@@ -133,7 +171,7 @@ func (conn *VTcpConn) VClose() error {
 	conn.mutex.Lock()
 	switch conn.status {
 	case SynSent:
-		conn.status = Closed
+		conn.closeDelete()
 	case FinWait2:
 		err = errClosing
 	case TimeWait:
@@ -153,11 +191,83 @@ func (conn *VTcpConn) VClose() error {
 
 func (conn *VTcpConn) closeDelete() {
 	conn.status = Closed
+	conn.rtoTimer = nil
+	conn.timeWaitTimer = nil
+	conn.queue = nil
 	delete(conn.d.ConnTable, SocketKeyFromSocketInterface(conn))
 }
 
+func (conn *VTcpConn) windowProbing() {
+	for {
+		payload := <-conn.tcb.windowProbeChan
+		// println("window probing")
+		// println("payload len:", len(payload))
+		wrappedSendNxt := conn.tcb.wrapFromIss(conn.tcb.sendNxt)
+		wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
+		packet := conn.CreateTcpPacket(wrappedSendNxt, wrappedRcvNxt, ACK, payload)
+		conn.d.SendTcp(conn.remoteAddr.Addr(), packet)
+	}
+}
+
+func (conn *VTcpConn) timeWaitTimeout() {
+	<-conn.timeWaitTimer.C
+	conn.mutex.Lock()
+	conn.closeDelete()
+	conn.mutex.Unlock()
+}
+
+func (conn *VTcpConn) startTimeOutTimer() {
+	conn.timeWaitTimer = time.NewTimer(time.Second * timeoutTimeWaitDuration)
+	go conn.timeWaitTimeout()
+}
+
+func (conn *VTcpConn) resetTimeWaitTimer() {
+	conn.timeWaitTimer = time.NewTimer(time.Second * timeoutTimeWaitDuration)
+}
+
+func (conn *VTcpConn) startRtoTimer() {
+	if conn.rtoTimer == nil {
+		conn.rtoTimer = time.NewTimer(time.Second * 2)
+		go conn.rtoTimeout()
+	}
+}
+
+func (conn *VTcpConn) rtoTimeout() {
+	for {
+		if conn.status == Closed {
+			return
+		}
+		<-conn.rtoTimer.C
+		items := conn.queue.Items()
+		if len(items) > 0 {
+			wrappedRcvNxt := conn.tcb.wrapFromIrs(conn.tcb.rcvNxt)
+			entry := conn.queue.Peek()
+			println("retransmitting")
+			println("entry seqNUm:", entry.seqNum, "wrappedRcvNxt:", wrappedRcvNxt, "len payload", len(entry.payload))
+			packet := conn.CreateTcpPacket(entry.seqNum, wrappedRcvNxt, entry.flags, entry.payload)
+			conn.d.SendTcp(conn.remoteAddr.Addr(), packet)
+			conn.resetRtoTimer()
+		}
+
+	}
+}
+
+func (conn *VTcpConn) resetRtoTimer() {
+	// conn.rtoTimer = time.NewTimer(min(UBOUND, max(LBOUND, time.Duration((BETA*conn.srtt))*time.Millisecond)))
+	conn.rtoTimer = time.NewTimer(time.Second * 10)
+}
+
+func (conn *VTcpConn) updateSrtt(entries []*rtoEntry) {
+	// var rto time.Duration
+	for _, entry := range entries {
+		currTime := time.Now()
+		// RTT measure in milliseconds
+		Rtt := currTime.Sub(entry.start)
+		conn.srtt = (ALPHA * conn.srtt) + ((1 - ALPHA) * float64(Rtt.Milliseconds()))
+	}
+}
+
 // TODO should make this private later
-// TODO see data OFFSET and windows size
 func (conn *VTcpConn) CreateTcpPacket(seqNum uint32, ackNum uint32, flags uint8, payload []byte) tcpheader.TcpPacket {
 	hdr := header.TCPFields{
 		SrcPort:       conn.localAddr.Port(),
@@ -207,6 +317,11 @@ func (conn *VTcpConn) GetStatus() Status {
 // general send
 func (conn *VTcpConn) send(seqNum uint32, ackNum uint32, flags uint8, payload []byte) (int, error) {
 	packet := conn.CreateTcpPacket(seqNum, ackNum, flags, payload)
+	if flags&SYN == SYN || flags&FIN == FIN || len(payload) > 0 {
+		entry := &rtoEntry{seqNum: seqNum, flags: flags, payload: payload, start: time.Now()}
+		conn.queue.Push(entry)
+		conn.startRtoTimer()
+	}
 	return conn.d.SendTcp(conn.remoteAddr.Addr(), packet)
 }
 

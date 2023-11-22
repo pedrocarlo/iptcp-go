@@ -62,19 +62,23 @@ func (ln *VTcpListener) VAccept() (*VTcpConn, error) {
 	/* Listen State Specfication SYN BIT End */
 
 	// Wait for Ack from channel else timeout
-	select {
-	case <-conn.signalChannel:
-		// conn.tcb.initializeControllers()
-	// TODO See correct timeout way of doing it
-	case <-time.NewTimer(time.Second).C:
-		conn.closeDelete()
-		return nil, errTimeout
+	for i := 0; i < 4; i++ {
+		select {
+		case <-conn.signalChannel:
+			return conn, nil
+		case <-time.NewTimer(time.Second * time.Duration(i)).C:
+			// return nil, errTimeout
+		}
 	}
-	return conn, nil
+	conn.closeDelete()
+	return nil, errTimeout
 }
 
 func (ln *VTcpListener) VClose() error {
+	ln.d.Mutex.Lock()
 	ln.status = Closed
+	delete(ln.d.ListenTable, SocketKeyFromSocketInterface(ln))
+	ln.d.Mutex.Unlock()
 	return nil
 }
 

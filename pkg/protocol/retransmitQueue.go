@@ -1,6 +1,8 @@
 package protocol
 
-import "time"
+import (
+	"time"
+)
 
 type rtoEntry struct {
 	seqNum  uint32
@@ -35,26 +37,34 @@ func (h *rtoQueue) Push(x interface{}) {
 }
 
 func (h *rtoQueue) Pop() interface{} {
+	if h.Len() <= 0 {
+		return nil
+	}
 	old := *h
 	n := len(old)
 	x := old[n-1]
-	*h = old[:n-1]
-	old[n-1] = nil
+	*h = old[0 : n-1]
 	return x
 }
 
-func (h rtoQueue) Peek() *rtoEntry {
-	return h[h.Len()-1]
+func (h *rtoQueue) Peek() *rtoEntry {
+	if h.Len() > 0 {
+		return (*h)[h.Len()-1]
+	}
+	return nil
 }
 
-func (h rtoQueue) Cleanup(tcb *TCB) []*rtoEntry {
+func (h *rtoQueue) Cleanup(tcb *TCB) []*rtoEntry {
 	popped := make([]*rtoEntry, 0)
-	for h.Len() != 0 {
+	for curr := h.Peek(); curr != nil; curr = h.Peek() {
 		// Already acknowledged data
-		if wrappedCompare(h.Peek().seqNum, tcb.wrapFromIss(tcb.sendUna)) == -1 {
-			// popped = append(popped, h.Pop().(*rtoEntry))
-			h.Pop()
+		// println("Seq Num entry:", curr.seqNum)
+		// println("send una wrapped:", tcb.wrapFromIss(tcb.sendUna), "sendUna normal", tcb.sendUna)
+		// println("compare:", wrappedCompare(curr.seqNum, tcb.wrapFromIss(tcb.sendUna)))
+		if wrappedCompare(curr.seqNum, tcb.wrapFromIss(tcb.sendUna)) >= 0 {
+			break
 		}
+		popped = append(popped, h.Pop().(*rtoEntry))
 	}
 	return popped
 }

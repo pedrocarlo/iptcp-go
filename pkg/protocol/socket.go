@@ -79,7 +79,7 @@ func tcpHandler(d *Device, p *Packet, _ []interface{}) {
 	// tcpChecksumFromHeader := tcpHdr.Checksum
 	tcpHdr.Checksum = 0
 	// tcpComputedChecksum := tcpheader.ComputeTCPChecksum(&tcpHdr, p.Header.Src, p.Header.Dst, tcpPayload)
-
+	
 	// TODO CHECKSUM LATER
 
 	// if tcpChecksumFromHeader != tcpComputedChecksum {

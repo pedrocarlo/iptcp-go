@@ -1,0 +1,1379 @@
+
+
+
+
+Internet Engineering Task Force (IETF)                      W. Eddy, Ed.
+STD: 7                                                       MTI Systems
+Request for Comments: 9293                                   August 2022
+Obsoletes: 793, 879, 2873, 6093, 6429, 6528,                            
+           6691                                                         
+Updates: 1011, 1122, 5961                                               
+Category: Standards Track                                               
+ISSN: 2070-1721
+
+
+                  Transmission Control Protocol (TCP)
+
+Abstract
+
+   This document specifies the Transmission Control Protocol (TCP).  TCP
+   is an important transport-layer protocol in the Internet protocol
+   stack, and it has continuously evolved over decades of use and growth
+   of the Internet.  Over this time, a number of changes have been made
+   to TCP as it was specified in RFC 793, though these have only been
+   documented in a piecemeal fashion.  This document collects and brings
+   those changes together with the protocol specification from RFC 793.
+   This document obsoletes RFC 793, as well as RFCs 879, 2873, 6093,
+   6429, 6528, and 6691 that updated parts of RFC 793.  It updates RFCs
+   1011 and 1122, and it should be considered as a replacement for the
+   portions of those documents dealing with TCP requirements.  It also
+   updates RFC 5961 by adding a small clarification in reset handling
+   while in the SYN-RECEIVED state.  The TCP header control bits from
+   RFC 793 have also been updated based on RFC 3168.
+
+Status of This Memo
+
+   This is an Internet Standards Track document.
+
+   This document is a product of the Internet Engineering Task Force
+   (IETF).  It represents the consensus of the IETF community.  It has
+   received public review and has been approved for publication by the
+   Internet Engineering Steering Group (IESG).  Further information on
+   Internet Standards is available in Section 2 of RFC 7841.
+
+   Information about the current status of this document, any errata,
+   and how to provide feedback on it may be obtained at
+   https://www.rfc-editor.org/info/rfc9293.
+
+Copyright Notice
+
+   Copyright (c) 2022 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (https://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Revised BSD License text as described in Section 4.e of the
+   Trust Legal Provisions and are provided without warranty as described
+   in the Revised BSD License.
+
+   This document may contain material from IETF Documents or IETF
+   Contributions published or made publicly available before November
+   10, 2008.  The person(s) controlling the copyright in some of this
+   material may not have granted the IETF Trust the right to allow
+   modifications of such material outside the IETF Standards Process.
+   Without obtaining an adequate license from the person(s) controlling
+   the copyright in such materials, this document may not be modified
+   outside the IETF Standards Process, and derivative works of it may
+   not be created outside the IETF Standards Process, except to format
+   it for publication as an RFC or to translate it into languages other
+   than English.
+
+Table of Contents
+
+   1.  Purpose and Scope
+   2.  Introduction
+     2.1.  Requirements Language
+     2.2.  Key TCP Concepts
+   3.  Functional Specification
+     3.1.  Header Format
+     3.2.  Specific Option Definitions
+       3.2.1.  Other Common Options
+       3.2.2.  Experimental TCP Options
+     3.3.  TCP Terminology Overview
+       3.3.1.  Key Connection State Variables
+       3.3.2.  State Machine Overview
+     3.4.  Sequence Numbers
+       3.4.1.  Initial Sequence Number Selection
+       3.4.2.  Knowing When to Keep Quiet
+       3.4.3.  The TCP Quiet Time Concept
+     3.5.  Establishing a Connection
+       3.5.1.  Half-Open Connections and Other Anomalies
+       3.5.2.  Reset Generation
+       3.5.3.  Reset Processing
+     3.6.  Closing a Connection
+       3.6.1.  Half-Closed Connections
+     3.7.  Segmentation
+       3.7.1.  Maximum Segment Size Option
+       3.7.2.  Path MTU Discovery
+       3.7.3.  Interfaces with Variable MTU Values
+       3.7.4.  Nagle Algorithm
+       3.7.5.  IPv6 Jumbograms
+     3.8.  Data Communication
+       3.8.1.  Retransmission Timeout
+       3.8.2.  TCP Congestion Control
+       3.8.3.  TCP Connection Failures
+       3.8.4.  TCP Keep-Alives
+       3.8.5.  The Communication of Urgent Information
+       3.8.6.  Managing the Window
+     3.9.  Interfaces
+       3.9.1.  User/TCP Interface
+       3.9.2.  TCP/Lower-Level Interface
+     3.10. Event Processing
+       3.10.1.  OPEN Call
+       3.10.2.  SEND Call
+       3.10.3.  RECEIVE Call
+       3.10.4.  CLOSE Call
+       3.10.5.  ABORT Call
+       3.10.6.  STATUS Call
+       3.10.7.  SEGMENT ARRIVES
+       3.10.8.  Timeouts
+   4.  Glossary
+   5.  Changes from RFC 793
+   6.  IANA Considerations
+   7.  Security and Privacy Considerations
+   8.  References
+     8.1.  Normative References
+     8.2.  Informative References
+   Appendix A.  Other Implementation Notes
+     A.1.  IP Security Compartment and Precedence
+       A.1.1.  Precedence
+       A.1.2.  MLS Systems
+     A.2.  Sequence Number Validation
+     A.3.  Nagle Modification
+     A.4.  Low Watermark Settings
+   Appendix B.  TCP Requirement Summary
+   Acknowledgments
+   Author's Address
+
+1.  Purpose and Scope
+
+   In 1981, RFC 793 [16] was released, documenting the Transmission
+   Control Protocol (TCP) and replacing earlier published specifications
+   for TCP.
+
+   Since then, TCP has been widely implemented, and it has been used as
+   a transport protocol for numerous applications on the Internet.
+
+   For several decades, RFC 793 plus a number of other documents have
+   combined to serve as the core specification for TCP [49].  Over time,
+   a number of errata have been filed against RFC 793.  There have also
+   been deficiencies found and resolved in security, performance, and
+   many other aspects.  The number of enhancements has grown over time
+   across many separate documents.  These were never accumulated
+   together into a comprehensive update to the base specification.
+
+   The purpose of this document is to bring together all of the IETF
+   Standards Track changes and other clarifications that have been made
+   to the base TCP functional specification (RFC 793) and to unify them
+   into an updated version of the specification.
+
+   Some companion documents are referenced for important algorithms that
+   are used by TCP (e.g., for congestion control) but have not been
+   completely included in this document.  This is a conscious choice, as
+   this base specification can be used with multiple additional
+   algorithms that are developed and incorporated separately.  This
+   document focuses on the common basis that all TCP implementations
+   must support in order to interoperate.  Since some additional TCP
+   features have become quite complicated themselves (e.g., advanced
+   loss recovery and congestion control), future companion documents may
+   attempt to similarly bring these together.
+
+   In addition to the protocol specification that describes the TCP
+   segment format, generation, and processing rules that are to be
+   implemented in code, RFC 793 and other updates also contain
+   informative and descriptive text for readers to understand aspects of
+   the protocol design and operation.  This document does not attempt to
+   alter or update this informative text and is focused only on updating
+   the normative protocol specification.  This document preserves
+   references to the documentation containing the important explanations
+   and rationale, where appropriate.
+
+   This document is intended to be useful both in checking existing TCP
+   implementations for conformance purposes, as well as in writing new
+   implementations.
+
+2.  Introduction
+
+   RFC 793 contains a discussion of the TCP design goals and provides
+   examples of its operation, including examples of connection
+   establishment, connection termination, and packet retransmission to
+   repair losses.
+
+   This document describes the basic functionality expected in modern
+   TCP implementations and replaces the protocol specification in RFC
+   793.  It does not replicate or attempt to update the introduction and
+   philosophy content in Sections 1 and 2 of RFC 793.  Other documents
+   are referenced to provide explanations of the theory of operation,
+   rationale, and detailed discussion of design decisions.  This
+   document only focuses on the normative behavior of the protocol.
+
+   The "TCP Roadmap" [49] provides a more extensive guide to the RFCs
+   that define TCP and describe various important algorithms.  The TCP
+   Roadmap contains sections on strongly encouraged enhancements that
+   improve performance and other aspects of TCP beyond the basic
+   operation specified in this document.  As one example, implementing
+   congestion control (e.g., [8]) is a TCP requirement, but it is a
+   complex topic on its own and not described in detail in this
+   document, as there are many options and possibilities that do not
+   impact basic interoperability.  Similarly, most TCP implementations
+   today include the high-performance extensions in [47], but these are
+   not strictly required or discussed in this document.  Multipath
+   considerations for TCP are also specified separately in [59].
+
+   A list of changes from RFC 793 is contained in Section 5.
+
+2.1.  Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [3] [12] when, and only when, they appear in all capitals, as
+   shown here.
+
+   Each use of RFC 2119 keywords in the document is individually labeled
+   and referenced in Appendix B, which summarizes implementation
+   requirements.
+
+   Sentences using "MUST" are labeled as "MUST-X" with X being a numeric
+   identifier enabling the requirement to be located easily when
+   referenced from Appendix B.
+
+   Similarly, sentences using "SHOULD" are labeled with "SHLD-X", "MAY"
+   with "MAY-X", and "RECOMMENDED" with "REC-X".
+
+   For the purposes of this labeling, "SHOULD NOT" and "MUST NOT" are
+   labeled the same as "SHOULD" and "MUST" instances.
+
+2.2.  Key TCP Concepts
+
+   TCP provides a reliable, in-order, byte-stream service to
+   applications.
+
+   The application byte-stream is conveyed over the network via TCP
+   segments, with each TCP segment sent as an Internet Protocol (IP)
+   datagram.
+
+   TCP reliability consists of detecting packet losses (via sequence
+   numbers) and errors (via per-segment checksums), as well as
+   correction via retransmission.
+
+   TCP supports unicast delivery of data.  There are anycast
+   applications that can successfully use TCP without modifications,
+   though there is some risk of instability due to changes of lower-
+   layer forwarding behavior [46].
+
+   TCP is connection oriented, though it does not inherently include a
+   liveness detection capability.
+
+   Data flow is supported bidirectionally over TCP connections, though
+   applications are free to send data only unidirectionally, if they so
+   choose.
+
+   TCP uses port numbers to identify application services and to
+   multiplex distinct flows between hosts.
+
+   A more detailed description of TCP features compared to other
+   transport protocols can be found in Section 3.1 of [52].  Further
+   description of the motivations for developing TCP and its role in the
+   Internet protocol stack can be found in Section 2 of [16] and earlier
+   versions of the TCP specification.
+
+3.  Functional Specification
+
+3.1.  Header Format
+
+   TCP segments are sent as internet datagrams.  The Internet Protocol
+   (IP) header carries several information fields, including the source
+   and destination host addresses [1] [13].  A TCP header follows the IP
+   headers, supplying information specific to TCP.  This division allows
+   for the existence of host-level protocols other than TCP.  In the
+   early development of the Internet suite of protocols, the IP header
+   fields had been a part of TCP.
+
+   This document describes TCP, which uses TCP headers.
+
+   A TCP header, followed by any user data in the segment, is formatted
+   as follows, using the style from [66]:
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |          Source Port          |       Destination Port        |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                        Sequence Number                        |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                    Acknowledgment Number                      |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |  Data |       |C|E|U|A|P|R|S|F|                               |
+      | Offset| Rsrvd |W|C|R|C|S|S|Y|I|            Window             |
+      |       |       |R|E|G|K|H|T|N|N|                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |           Checksum            |         Urgent Pointer        |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                           [Options]                           |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                                                               :
+      :                             Data                              :
+      :                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+             Note that one tick mark represents one bit position.
+
+                        Figure 1: TCP Header Format
+
+   where:
+
+   Source Port:  16 bits
+
+     The source port number.
+
+   Destination Port:  16 bits
+
+     The destination port number.
+
+   Sequence Number:  32 bits
+
+     The sequence number of the first data octet in this segment (except
+     when the SYN flag is set).  If SYN is set, the sequence number is
+     the initial sequence number (ISN) and the first data octet is
+     ISN+1.
+
+   Acknowledgment Number:  32 bits
+
+     If the ACK control bit is set, this field contains the value of the
+     next sequence number the sender of the segment is expecting to
+     receive.  Once a connection is established, this is always sent.
+
+   Data Offset (DOffset):  4 bits
+
+     The number of 32-bit words in the TCP header.  This indicates where
+     the data begins.  The TCP header (even one including options) is an
+     integer multiple of 32 bits long.
+
+   Reserved (Rsrvd):  4 bits
+
+     A set of control bits reserved for future use.  Must be zero in
+     generated segments and must be ignored in received segments if the
+     corresponding future features are not implemented by the sending or
+     receiving host.
+
+   Control bits:  The control bits are also known as "flags".
+     Assignment is managed by IANA from the "TCP Header Flags" registry
+     [62].  The currently assigned control bits are CWR, ECE, URG, ACK,
+     PSH, RST, SYN, and FIN.
+
+     CWR:  1 bit
+
+         Congestion Window Reduced (see [6]).
+
+     ECE:  1 bit
+
+         ECN-Echo (see [6]).
+
+     URG:  1 bit
+
+         Urgent pointer field is significant.
+
+     ACK:  1 bit
+
+         Acknowledgment field is significant.
+
+     PSH:  1 bit
+
+         Push function (see the Send Call description in Section 3.9.1).
+
+     RST:  1 bit
+
+         Reset the connection.
+
+     SYN:  1 bit
+
+         Synchronize sequence numbers.
+
+     FIN:  1 bit
+
+         No more data from sender.
+
+   Window:  16 bits
+
+     The number of data octets beginning with the one indicated in the
+     acknowledgment field that the sender of this segment is willing to
+     accept.  The value is shifted when the window scaling extension is
+     used [47].
+
+     The window size MUST be treated as an unsigned number, or else
+     large window sizes will appear like negative windows and TCP will
+     not work (MUST-1).  It is RECOMMENDED that implementations will
+     reserve 32-bit fields for the send and receive window sizes in the
+     connection record and do all window computations with 32 bits (REC-
+     1).
+
+   Checksum:  16 bits
+
+     The checksum field is the 16-bit ones' complement of the ones'
+     complement sum of all 16-bit words in the header and text.  The
+     checksum computation needs to ensure the 16-bit alignment of the
+     data being summed.  If a segment contains an odd number of header
+     and text octets, alignment can be achieved by padding the last
+     octet with zeros on its right to form a 16-bit word for checksum
+     purposes.  The pad is not transmitted as part of the segment.
+     While computing the checksum, the checksum field itself is replaced
+     with zeros.
+
+     The checksum also covers a pseudo-header (Figure 2) conceptually
+     prefixed to the TCP header.  The pseudo-header is 96 bits for IPv4
+     and 320 bits for IPv6.  Including the pseudo-header in the checksum
+     gives the TCP connection protection against misrouted segments.
+     This information is carried in IP headers and is transferred across
+     the TCP/network interface in the arguments or results of calls by
+     the TCP implementation on the IP layer.
+
+                     +--------+--------+--------+--------+
+                     |           Source Address          |
+                     +--------+--------+--------+--------+
+                     |         Destination Address       |
+                     +--------+--------+--------+--------+
+                     |  zero  |  PTCL  |    TCP Length   |
+                     +--------+--------+--------+--------+
+
+                         Figure 2: IPv4 Pseudo-header
+
+     Pseudo-header components for IPv4:
+       Source Address:  the IPv4 source address in network byte order
+
+       Destination Address:  the IPv4 destination address in network
+          byte order
+
+       zero:  bits set to zero
+
+       PTCL:  the protocol number from the IP header
+
+       TCP Length:  the TCP header length plus the data length in octets
+          (this is not an explicitly transmitted quantity but is
+          computed), and it does not count the 12 octets of the pseudo-
+          header.
+
+     For IPv6, the pseudo-header is defined in Section 8.1 of RFC 8200
+     [13] and contains the IPv6 Source Address and Destination Address,
+     an Upper-Layer Packet Length (a 32-bit value otherwise equivalent
+     to TCP Length in the IPv4 pseudo-header), three bytes of zero
+     padding, and a Next Header value, which differs from the IPv6
+     header value if there are extension headers present between IPv6
+     and TCP.
+
+     The TCP checksum is never optional.  The sender MUST generate it
+     (MUST-2) and the receiver MUST check it (MUST-3).
+
+   Urgent Pointer:  16 bits
+
+     This field communicates the current value of the urgent pointer as
+     a positive offset from the sequence number in this segment.  The
+     urgent pointer points to the sequence number of the octet following
+     the urgent data.  This field is only to be interpreted in segments
+     with the URG control bit set.
+
+   Options:  [TCP Option]; size(Options) == (DOffset-5)*32; present only
+     when DOffset > 5.  Note that this size expression also includes any
+     padding trailing the actual options present.
+
+     Options may occupy space at the end of the TCP header and are a
+     multiple of 8 bits in length.  All options are included in the
+     checksum.  An option may begin on any octet boundary.  There are
+     two cases for the format of an option:
+
+     Case 1:  A single octet of option-kind.
+
+     Case 2:  An octet of option-kind (Kind), an octet of option-length,
+        and the actual option-data octets.
+
+     The option-length counts the two octets of option-kind and option-
+     length as well as the option-data octets.
+
+     Note that the list of options may be shorter than the Data Offset
+     field might imply.  The content of the header beyond the End of
+     Option List Option MUST be header padding of zeros (MUST-69).
+
+     The list of all currently defined options is managed by IANA [62],
+     and each option is defined in other RFCs, as indicated there.  That
+     set includes experimental options that can be extended to support
+     multiple concurrent usages [45].
+
+     A given TCP implementation can support any currently defined
+     options, but the following options MUST be supported (MUST-4 --
+     note Maximum Segment Size Option support is also part of MUST-14 in
+     Section 3.7.1):
+
+               +======+========+============================+
+               | Kind | Length | Meaning                    |
+               +======+========+============================+
+               | 0    | -      | End of Option List Option. |
+               +------+--------+----------------------------+
+               | 1    | -      | No-Operation.              |
+               +------+--------+----------------------------+
+               | 2    | 4      | Maximum Segment Size.      |
+               +------+--------+----------------------------+
+
+                       Table 1: Mandatory Option Set
+
+     These options are specified in detail in Section 3.2.
+
+     A TCP implementation MUST be able to receive a TCP Option in any
+     segment (MUST-5).
+
+     A TCP implementation MUST (MUST-6) ignore without error any TCP
+     Option it does not implement, assuming that the option has a length
+     field.  All TCP Options except End of Option List Option (EOL) and
+     No-Operation (NOP) MUST have length fields, including all future
+     options (MUST-68).  TCP implementations MUST be prepared to handle
+     an illegal option length (e.g., zero); a suggested procedure is to
+     reset the connection and log the error cause (MUST-7).
+
+     Note: There is ongoing work to extend the space available for TCP
+     Options, such as [65].
+
+   Data:  variable length
+
+     User data carried by the TCP segment.
+
+3.2.  Specific Option Definitions
+
+   A TCP Option, in the mandatory option set, is one of an End of Option
+   List Option, a No-Operation Option, or a Maximum Segment Size Option.
+
+   An End of Option List Option is formatted as follows:
+
+       0
+       0 1 2 3 4 5 6 7
+      +-+-+-+-+-+-+-+-+
+      |       0       |
+      +-+-+-+-+-+-+-+-+
+
+   where:
+
+   Kind:  1 byte; Kind == 0.
+
+     This option code indicates the end of the option list.  This might
+     not coincide with the end of the TCP header according to the Data
+     Offset field.  This is used at the end of all options, not the end
+     of each option, and need only be used if the end of the options
+     would not otherwise coincide with the end of the TCP header.
+
+   A No-Operation Option is formatted as follows:
+
+       0
+       0 1 2 3 4 5 6 7
+      +-+-+-+-+-+-+-+-+
+      |       1       |
+      +-+-+-+-+-+-+-+-+
+
+   where:
+
+   Kind:  1 byte; Kind == 1.
+
+     This option code can be used between options, for example, to align
+     the beginning of a subsequent option on a word boundary.  There is
+     no guarantee that senders will use this option, so receivers MUST
+     be prepared to process options even if they do not begin on a word
+     boundary (MUST-64).
+
+   A Maximum Segment Size Option is formatted as follows:
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |       2       |     Length    |   Maximum Segment Size (MSS)  |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+   where:
+
+   Kind:  1 byte; Kind == 2.
+
+     If this option is present, then it communicates the maximum receive
+     segment size at the TCP endpoint that sends this segment.  This
+     value is limited by the IP reassembly limit.  This field may be
+     sent in the initial connection request (i.e., in segments with the
+     SYN control bit set) and MUST NOT be sent in other segments (MUST-
+     65).  If this option is not used, any segment size is allowed.  A
+     more complete description of this option is provided in
+     Section 3.7.1.
+
+   Length:  1 byte; Length == 4.
+
+     Length of the option in bytes.
+
+   Maximum Segment Size (MSS):  2 bytes.
+
+     The maximum receive segment size at the TCP endpoint that sends
+     this segment.
+
+3.2.1.  Other Common Options
+
+   Additional RFCs define some other commonly used options that are
+   recommended to implement for high performance but are not necessary
+   for basic TCP interoperability.  These are the TCP Selective
+   Acknowledgment (SACK) Option [22] [26], TCP Timestamp (TS) Option
+   [47], and TCP Window Scale (WS) Option [47].
+
+3.2.2.  Experimental TCP Options
+
+   Experimental TCP Option values are defined in [30], and [45]
+   describes the current recommended usage for these experimental
+   values.
+
+3.3.  TCP Terminology Overview
+
+   This section includes an overview of key terms needed to understand
+   the detailed protocol operation in the rest of the document.  There
+   is a glossary of terms in Section 4.
+
+3.3.1.  Key Connection State Variables
+
+   Before we can discuss the operation of the TCP implementation in
+   detail, we need to introduce some detailed terminology.  The
+   maintenance of a TCP connection requires maintaining state for
+   several variables.  We conceive of these variables being stored in a
+   connection record called a Transmission Control Block or TCB.  Among
+   the variables stored in the TCB are the local and remote IP addresses
+   and port numbers, the IP security level, and compartment of the
+   connection (see Appendix A.1), pointers to the user's send and
+   receive buffers, pointers to the retransmit queue and to the current
+   segment.  In addition, several variables relating to the send and
+   receive sequence numbers are stored in the TCB.
+
+    +==========+=====================================================+
+    | Variable | Description                                         |
+    +==========+=====================================================+
+    | SND.UNA  | send unacknowledged                                 |
+    +----------+-----------------------------------------------------+
+    | SND.NXT  | send next                                           |
+    +----------+-----------------------------------------------------+
+    | SND.WND  | send window                                         |
+    +----------+-----------------------------------------------------+
+    | SND.UP   | send urgent pointer                                 |
+    +----------+-----------------------------------------------------+
+    | SND.WL1  | segment sequence number used for last window update |
+    +----------+-----------------------------------------------------+
+    | SND.WL2  | segment acknowledgment number used for last window  |
+    |          | update                                              |
+    +----------+-----------------------------------------------------+
+    | ISS      | initial send sequence number                        |
+    +----------+-----------------------------------------------------+
+
+                     Table 2: Send Sequence Variables
+
+              +==========+=================================+
+              | Variable | Description                     |
+              +==========+=================================+
+              | RCV.NXT  | receive next                    |
+              +----------+---------------------------------+
+              | RCV.WND  | receive window                  |
+              +----------+---------------------------------+
+              | RCV.UP   | receive urgent pointer          |
+              +----------+---------------------------------+
+              | IRS      | initial receive sequence number |
+              +----------+---------------------------------+
+
+                   Table 3: Receive Sequence Variables
+
+   The following diagrams may help to relate some of these variables to
+   the sequence space.
+
+                      1         2          3          4
+                 ----------|----------|----------|----------
+                        SND.UNA    SND.NXT    SND.UNA
+                                             +SND.WND
+
+           1 - old sequence numbers that have been acknowledged
+           2 - sequence numbers of unacknowledged data
+           3 - sequence numbers allowed for new data transmission
+           4 - future sequence numbers that are not yet allowed
+
+                       Figure 3: Send Sequence Space
+
+   The send window is the portion of the sequence space labeled 3 in
+   Figure 3.
+
+                          1          2          3
+                      ----------|----------|----------
+                             RCV.NXT    RCV.NXT
+                                       +RCV.WND
+
+           1 - old sequence numbers that have been acknowledged
+           2 - sequence numbers allowed for new reception
+           3 - future sequence numbers that are not yet allowed
+
+                      Figure 4: Receive Sequence Space
+
+   The receive window is the portion of the sequence space labeled 2 in
+   Figure 4.
+
+   There are also some variables used frequently in the discussion that
+   take their values from the fields of the current segment.
+
+               +==========+===============================+
+               | Variable | Description                   |
+               +==========+===============================+
+               | SEG.SEQ  | segment sequence number       |
+               +----------+-------------------------------+
+               | SEG.ACK  | segment acknowledgment number |
+               +----------+-------------------------------+
+               | SEG.LEN  | segment length                |
+               +----------+-------------------------------+
+               | SEG.WND  | segment window                |
+               +----------+-------------------------------+
+               | SEG.UP   | segment urgent pointer        |
+               +----------+-------------------------------+
+
+                    Table 4: Current Segment Variables
+
+3.3.2.  State Machine Overview
+
+   A connection progresses through a series of states during its
+   lifetime.  The states are: LISTEN, SYN-SENT, SYN-RECEIVED,
+   ESTABLISHED, FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK,
+   TIME-WAIT, and the fictional state CLOSED.  CLOSED is fictional
+   because it represents the state when there is no TCB, and therefore,
+   no connection.  Briefly the meanings of the states are:
+
+   LISTEN -  represents waiting for a connection request from any remote
+      TCP peer and port.
+
+   SYN-SENT -  represents waiting for a matching connection request
+      after having sent a connection request.
+
+   SYN-RECEIVED -  represents waiting for a confirming connection
+      request acknowledgment after having both received and sent a
+      connection request.
+
+   ESTABLISHED -  represents an open connection, data received can be
+      delivered to the user.  The normal state for the data transfer
+      phase of the connection.
+
+   FIN-WAIT-1 -  represents waiting for a connection termination request
+      from the remote TCP peer, or an acknowledgment of the connection
+      termination request previously sent.
+
+   FIN-WAIT-2 -  represents waiting for a connection termination request
+      from the remote TCP peer.
+
+   CLOSE-WAIT -  represents waiting for a connection termination request
+      from the local user.
+
+   CLOSING -  represents waiting for a connection termination request
+      acknowledgment from the remote TCP peer.
+
+   LAST-ACK -  represents waiting for an acknowledgment of the
+      connection termination request previously sent to the remote TCP
+      peer (this termination request sent to the remote TCP peer already
+      included an acknowledgment of the termination request sent from
+      the remote TCP peer).
+
+   TIME-WAIT -  represents waiting for enough time to pass to be sure
+      the remote TCP peer received the acknowledgment of its connection
+      termination request and to avoid new connections being impacted by
+      delayed segments from previous connections.
+
+   CLOSED -  represents no connection state at all.
+
+   A TCP connection progresses from one state to another in response to
+   events.  The events are the user calls, OPEN, SEND, RECEIVE, CLOSE,
+   ABORT, and STATUS; the incoming segments, particularly those
+   containing the SYN, ACK, RST, and FIN flags; and timeouts.
+
+   The OPEN call specifies whether connection establishment is to be
+   actively pursued, or to be passively waited for.
+
+   A passive OPEN request means that the process wants to accept
+   incoming connection requests, in contrast to an active OPEN
+   attempting to initiate a connection.
+
+   The state diagram in Figure 5 illustrates only state changes,
+   together with the causing events and resulting actions, but addresses
+   neither error conditions nor actions that are not connected with
+   state changes.  In a later section, more detail is offered with
+   respect to the reaction of the TCP implementation to events.  Some
+   state names are abbreviated or hyphenated differently in the diagram
+   from how they appear elsewhere in the document.
+
+   NOTA BENE:  This diagram is only a summary and must not be taken as
+      the total specification.  Many details are not included.
+
+                               +---------+ ---------\      active OPEN
+                               |  CLOSED |            \    -----------
+                               +---------+<---------\   \   create TCB
+                                 |     ^              \   \  snd SYN
+                    passive OPEN |     |   CLOSE        \   \
+                    ------------ |     | ----------       \   \
+                     create TCB  |     | delete TCB         \   \
+                                 V     |                      \   \
+             rcv RST (note 1)  +---------+            CLOSE    |    \
+          -------------------->|  LISTEN |          ---------- |     |
+         /                     +---------+          delete TCB |     |
+        /           rcv SYN      |     |     SEND              |     |
+       /           -----------   |     |    -------            |     V
+   +--------+      snd SYN,ACK  /       \   snd SYN          +--------+
+   |        |<-----------------           ------------------>|        |
+   |  SYN   |                    rcv SYN                     |  SYN   |
+   |  RCVD  |<-----------------------------------------------|  SENT  |
+   |        |                  snd SYN,ACK                   |        |
+   |        |------------------           -------------------|        |
+   +--------+   rcv ACK of SYN  \       /  rcv SYN,ACK       +--------+
+      |         --------------   |     |   -----------
+      |                x         |     |     snd ACK
+      |                          V     V
+      |  CLOSE                 +---------+
+      | -------                |  ESTAB  |
+      | snd FIN                +---------+
+      |                 CLOSE    |     |    rcv FIN
+      V                -------   |     |    -------
+   +---------+         snd FIN  /       \   snd ACK         +---------+
+   |  FIN    |<----------------          ------------------>|  CLOSE  |
+   | WAIT-1  |------------------                            |   WAIT  |
+   +---------+          rcv FIN  \                          +---------+
+     | rcv ACK of FIN   -------   |                          CLOSE  |
+     | --------------   snd ACK   |                         ------- |
+     V        x                   V                         snd FIN V
+   +---------+               +---------+                    +---------+
+   |FINWAIT-2|               | CLOSING |                    | LAST-ACK|
+   +---------+               +---------+                    +---------+
+     |              rcv ACK of FIN |                 rcv ACK of FIN |
+     |  rcv FIN     -------------- |    Timeout=2MSL -------------- |
+     |  -------            x       V    ------------        x       V
+      \ snd ACK              +---------+delete TCB          +---------+
+        -------------------->|TIME-WAIT|------------------->| CLOSED  |
+                             +---------+                    +---------+
+
+                   Figure 5: TCP Connection State Diagram
+
+   The following notes apply to Figure 5:
+
+   Note 1:  The transition from SYN-RECEIVED to LISTEN on receiving a
+      RST is conditional on having reached SYN-RECEIVED after a passive
+      OPEN.
+
+   Note 2:  The figure omits a transition from FIN-WAIT-1 to TIME-WAIT
+      if a FIN is received and the local FIN is also acknowledged.
+
+   Note 3:  A RST can be sent from any state with a corresponding
+      transition to TIME-WAIT (see [70] for rationale).  These
+      transitions are not explicitly shown; otherwise, the diagram would
+      become very difficult to read.  Similarly, receipt of a RST from
+      any state results in a transition to LISTEN or CLOSED, though this
+      is also omitted from the diagram for legibility.
+
+3.4.  Sequence Numbers
+
+   A fundamental notion in the design is that every octet of data sent
+   over a TCP connection has a sequence number.  Since every octet is
+   sequenced, each of them can be acknowledged.  The acknowledgment
+   mechanism employed is cumulative so that an acknowledgment of
+   sequence number X indicates that all octets up to but not including X
+   have been received.  This mechanism allows for straightforward
+   duplicate detection in the presence of retransmission.  The numbering
+   scheme of octets within a segment is as follows: the first data octet
+   immediately following the header is the lowest numbered, and the
+   following octets are numbered consecutively.
+
+   It is essential to remember that the actual sequence number space is
+   finite, though large.  This space ranges from 0 to 2^32 - 1.  Since
+   the space is finite, all arithmetic dealing with sequence numbers
+   must be performed modulo 2^32.  This unsigned arithmetic preserves
+   the relationship of sequence numbers as they cycle from 2^32 - 1 to 0
+   again.  There are some subtleties to computer modulo arithmetic, so
+   great care should be taken in programming the comparison of such
+   values.  The symbol "=<" means "less than or equal" (modulo 2^32).
+
+   The typical kinds of sequence number comparisons that the TCP
+   implementation must perform include:
+
+   (a)  Determining that an acknowledgment refers to some sequence
+        number sent but not yet acknowledged.
+
+   (b)  Determining that all sequence numbers occupied by a segment have
+        been acknowledged (e.g., to remove the segment from a
+        retransmission queue).
+
+   (c)  Determining that an incoming segment contains sequence numbers
+        that are expected (i.e., that the segment "overlaps" the receive
+        window).
+
+   In response to sending data, the TCP endpoint will receive
+   acknowledgments.  The following comparisons are needed to process the
+   acknowledgments:
+
+      SND.UNA = oldest unacknowledged sequence number
+
+      SND.NXT = next sequence number to be sent
+
+      SEG.ACK = acknowledgment from the receiving TCP peer (next
+      sequence number expected by the receiving TCP peer)
+
+      SEG.SEQ = first sequence number of a segment
+
+      SEG.LEN = the number of octets occupied by the data in the segment
+      (counting SYN and FIN)
+
+      SEG.SEQ+SEG.LEN-1 = last sequence number of a segment
+
+   A new acknowledgment (called an "acceptable ack") is one for which
+   the inequality below holds:
+
+      SND.UNA < SEG.ACK =< SND.NXT
+
+   A segment on the retransmission queue is fully acknowledged if the
+   sum of its sequence number and length is less than or equal to the
+   acknowledgment value in the incoming segment.
+
+   When data is received, the following comparisons are needed:
+
+      RCV.NXT = next sequence number expected on an incoming segment,
+      and is the left or lower edge of the receive window
+
+      RCV.NXT+RCV.WND-1 = last sequence number expected on an incoming
+      segment, and is the right or upper edge of the receive window
+
+      SEG.SEQ = first sequence number occupied by the incoming segment
+
+      SEG.SEQ+SEG.LEN-1 = last sequence number occupied by the incoming
+      segment
+
+   A segment is judged to occupy a portion of valid receive sequence
+   space if
+
+      RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+
+   or
+
+      RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
+
+   The first part of this test checks to see if the beginning of the
+   segment falls in the window, the second part of the test checks to
+   see if the end of the segment falls in the window; if the segment
+   passes either part of the test, it contains data in the window.
+
+   Actually, it is a little more complicated than this.  Due to zero
+   windows and zero-length segments, we have four cases for the
+   acceptability of an incoming segment:
+
+       +=========+=========+======================================+
+       | Segment | Receive | Test                                 |
+       | Length  | Window  |                                      |
+       +=========+=========+======================================+
+       | 0       | 0       | SEG.SEQ = RCV.NXT                    |
+       +---------+---------+--------------------------------------+
+       | 0       | >0      | RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND |
+       +---------+---------+--------------------------------------+
+       | >0      | 0       | not acceptable                       |
+       +---------+---------+--------------------------------------+
+       | >0      | >0      | RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND |
+       |         |         |                                      |
+       |         |         | or                                   |
+       |         |         |                                      |
+       |         |         | RCV.NXT =< SEG.SEQ+SEG.LEN-1 <       |
+       |         |         | RCV.NXT+RCV.WND                      |
+       +---------+---------+--------------------------------------+
+
+                   Table 5: Segment Acceptability Tests
+
+   Note that when the receive window is zero no segments should be
+   acceptable except ACK segments.  Thus, it is possible for a TCP
+   implementation to maintain a zero receive window while transmitting
+   data and receiving ACKs.  A TCP receiver MUST process the RST and URG
+   fields of all incoming segments, even when the receive window is zero
+   (MUST-66).
+
+   We have taken advantage of the numbering scheme to protect certain
+   control information as well.  This is achieved by implicitly
+   including some control flags in the sequence space so they can be
+   retransmitted and acknowledged without confusion (i.e., one and only
+   one copy of the control will be acted upon).  Control information is
+   not physically carried in the segment data space.  Consequently, we
+   must adopt rules for implicitly assigning sequence numbers to
+   control.  The SYN and FIN are the only controls requiring this
+   protection, and these controls are used only at connection opening
+   and closing.  For sequence number purposes, the SYN is considered to
+   occur before the first actual data octet of the segment in which it
+   occurs, while the FIN is considered to occur after the last actual
+   data octet in a segment in which it occurs.  The segment length
+   (SEG.LEN) includes both data and sequence space-occupying controls.
+   When a SYN is present, then SEG.SEQ is the sequence number of the
+   SYN.
+
+3.4.1.  Initial Sequence Number Selection
+
+   A connection is defined by a pair of sockets.  Connections can be
+   reused.  New instances of a connection will be referred to as
+   incarnations of the connection.  The problem that arises from this is
+   -- "how does the TCP implementation identify duplicate segments from
+   previous incarnations of the connection?"  This problem becomes
+   apparent if the connection is being opened and closed in quick
+   succession, or if the connection breaks with loss of memory and is
+   then reestablished.  To support this, the TIME-WAIT state limits the
+   rate of connection reuse, while the initial sequence number selection
+   described below further protects against ambiguity about which
+   incarnation of a connection an incoming packet corresponds to.
+
+   To avoid confusion, we must prevent segments from one incarnation of
+   a connection from being used while the same sequence numbers may
+   still be present in the network from an earlier incarnation.  We want
+   to assure this even if a TCP endpoint loses all knowledge of the
+   sequence numbers it has been using.  When new connections are
+   created, an initial sequence number (ISN) generator is employed that
+   selects a new 32-bit ISN.  There are security issues that result if
+   an off-path attacker is able to predict or guess ISN values [42].
+
+   TCP initial sequence numbers are generated from a number sequence
+   that monotonically increases until it wraps, known loosely as a
+   "clock".  This clock is a 32-bit counter that typically increments at
+   least once every roughly 4 microseconds, although it is neither
+   assumed to be realtime nor precise, and need not persist across
+   reboots.  The clock component is intended to ensure that with a
+   Maximum Segment Lifetime (MSL), generated ISNs will be unique since
+   it cycles approximately every 4.55 hours, which is much longer than
+   the MSL.  Please note that for modern networks that support high data
+   rates where the connection might start and quickly advance sequence
+   numbers to overlap within the MSL, it is recommended to implement the
+   Timestamp Option as mentioned later in Section 3.4.3.
+
+   A TCP implementation MUST use the above type of "clock" for clock-
+   driven selection of initial sequence numbers (MUST-8), and SHOULD
+   generate its initial sequence numbers with the expression:
+
+   ISN = M + F(localip, localport, remoteip, remoteport, secretkey)
+
+   where M is the 4 microsecond timer, and F() is a pseudorandom
+   function (PRF) of the connection's identifying parameters ("localip,
+   localport, remoteip, remoteport") and a secret key ("secretkey")
+   (SHLD-1).  F() MUST NOT be computable from the outside (MUST-9), or
+   an attacker could still guess at sequence numbers from the ISN used
+   for some other connection.  The PRF could be implemented as a
+   cryptographic hash of the concatenation of the TCP connection
+   parameters and some secret data.  For discussion of the selection of
+   a specific hash algorithm and management of the secret key data,
+   please see Section 3 of [42].
+
+   For each connection there is a send sequence number and a receive
+   sequence number.  The initial send sequence number (ISS) is chosen by
+   the data sending TCP peer, and the initial receive sequence number
+   (IRS) is learned during the connection-establishing procedure.
+
+   For a connection to be established or initialized, the two TCP peers
+   must synchronize on each other's initial sequence numbers.  This is
+   done in an exchange of connection-establishing segments carrying a
+   control bit called "SYN" (for synchronize) and the initial sequence
+   numbers.  As a shorthand, segments carrying the SYN bit are also
+   called "SYNs".  Hence, the solution requires a suitable mechanism for
+   picking an initial sequence number and a slightly involved handshake
+   to exchange the ISNs.
+
+   The synchronization requires each side to send its own initial
+   sequence number and to receive a confirmation of it in acknowledgment
+   from the remote TCP peer.  Each side must also receive the remote
+   peer's initial sequence number and send a confirming acknowledgment.
+
+       1) A --> B  SYN my sequence number is X
+       2) A <-- B  ACK your sequence number is X
+       3) A <-- B  SYN my sequence number is Y
+       4) A --> B  ACK your sequence number is Y
+
+   Because steps 2 and 3 can be combined in a single message this is
+   called the three-way (or three message) handshake (3WHS).
+
+   A 3WHS is necessary because sequence numbers are not tied to a global
+   clock in the network, and TCP implementations may have different
+   mechanisms for picking the ISNs.  The receiver of the first SYN has
+   no way of knowing whether the segment was an old one or not, unless
+   it remembers the last sequence number used on the connection (which
+   is not always possible), and so it must ask the sender to verify this
+   SYN.  The three-way handshake and the advantages of a clock-driven
+   scheme for ISN selection are discussed in [69].
+
+3.4.2.  Knowing When to Keep Quiet
+
+   A theoretical problem exists where data could be corrupted due to
+   confusion between old segments in the network and new ones after a
+   host reboots if the same port numbers and sequence space are reused.
+   The "quiet time" concept discussed below addresses this, and the
+   discussion of it is included for situations where it might be
+   relevant, although it is not felt to be necessary in most current
+   implementations.  The problem was more relevant earlier in the
+   history of TCP.  In practical use on the Internet today, the error-
+   prone conditions are sufficiently unlikely that it is safe to ignore.
+   Reasons why it is now negligible include: (a) ISS and ephemeral port
+   randomization have reduced likelihood of reuse of port numbers and
+   sequence numbers after reboots, (b) the effective MSL of the Internet
+   has declined as links have become faster, and (c) reboots often
+   taking longer than an MSL anyways.
+
+   To be sure that a TCP implementation does not create a segment
+   carrying a sequence number that may be duplicated by an old segment
+   remaining in the network, the TCP endpoint must keep quiet for an MSL
+   before assigning any sequence numbers upon starting up or recovering
+   from a situation where memory of sequence numbers in use was lost.
+   For this specification the MSL is taken to be 2 minutes.  This is an
+   engineering choice, and may be changed if experience indicates it is
+   desirable to do so.  Note that if a TCP endpoint is reinitialized in
+   some sense, yet retains its memory of sequence numbers in use, then
+   it need not wait at all; it must only be sure to use sequence numbers
+   larger than those recently used.
+
+3.4.3.  The TCP Quiet Time Concept
+
+   Hosts that for any reason lose knowledge of the last sequence numbers
+   transmitted on each active (i.e., not closed) connection shall delay
+   emitting any TCP segments for at least the agreed MSL in the internet
+   system that the host is a part of.  In the paragraphs below, an
+   explanation for this specification is given.  TCP implementers may
+   violate the "quiet time" restriction, but only at the risk of causing
+   some old data to be accepted as new or new data rejected as old
+   duplicated data by some receivers in the internet system.
+
+   TCP endpoints consume sequence number space each time a segment is
+   formed and entered into the network output queue at a source host.
+   The duplicate detection and sequencing algorithm in TCP relies on the
+   unique binding of segment data to sequence space to the extent that
+   sequence numbers will not cycle through all 2^32 values before the
+   segment data bound to those sequence numbers has been delivered and
+   acknowledged by the receiver and all duplicate copies of the segments
+   have "drained" from the internet.  Without such an assumption, two
+   distinct TCP segments could conceivably be assigned the same or
+   overlapping sequence numbers, causing confusion at the receiver as to
+   which data is new and which is old.  Remember that each segment is
+   bound to as many consecutive sequence numbers as there are octets of
+   data and SYN or FIN flags in the segment.
+
+   Under normal conditions, TCP implementations keep track of the next
+   sequence number to emit and the oldest awaiting acknowledgment so as
+   to avoid mistakenly reusing a sequence number before its first use
+   has been acknowledged.  This alone does not guarantee that old
+   duplicate data is drained from the net, so the sequence space has
+   been made large to reduce the probability that a wandering duplicate
+   will cause trouble upon arrival.  At 2 megabits/sec., it takes 4.5
+   hours to use up 2^32 octets of sequence space.  Since the maximum
+   segment lifetime in the net is not likely to exceed a few tens of
+   seconds, this is deemed ample protection for foreseeable nets, even
+   if data rates escalate to 10s of megabits/sec.  At 100 megabits/sec.,
+   the cycle time is 5.4 minutes, which may be a little short but still
+   within reason.  Much higher data rates are possible today, with
+   implications described in the final paragraph of this subsection.
+
+   The basic duplicate detection and sequencing algorithm in TCP can be
+   defeated, however, if a source TCP endpoint does not have any memory
+   of the sequence numbers it last used on a given connection.  For
+   example, if the TCP implementation were to start all connections with
+   sequence number 0, then upon the host rebooting, a TCP peer might re-
+   form an earlier connection (possibly after half-open connection
+   resolution) and emit packets with sequence numbers identical to or
+   overlapping with packets still in the network, which were emitted on
+   an earlier incarnation of the same connection.  In the absence of
+   knowledge about the sequence numbers used on a particular connection,
+   the TCP specification recommends that the source delay for MSL
+   seconds before emitting segments on the connection, to allow time for
+   segments from the earlier connection incarnation to drain from the
+   system.
+
+   Even hosts that can remember the time of day and use it to select
+   initial sequence number values are not immune from this problem
+   (i.e., even if time of day is used to select an initial sequence
+   number for each new connection incarnation).
+
+   Suppose, for example, that a connection is opened starting with
+   sequence number S.  Suppose that this connection is not used much and
+   that eventually the initial sequence number function (ISN(t)) takes
+   on a value equal to the sequence number, say S1, of the last segment
+   sent by this TCP endpoint on a particular connection.  Now suppose,
+   at this instant, the host reboots and establishes a new incarnation
+   of the connection.  The initial sequence number chosen is S1 = ISN(t)
+   -- last used sequence number on old incarnation of connection!  If
+   the recovery occurs quickly enough, any old duplicates in the net
+   bearing sequence numbers in the neighborhood of S1 may arrive and be
+   treated as new packets by the receiver of the new incarnation of the
+   connection.
+
+   The problem is that the recovering host may not know for how long it
+   was down between rebooting nor does it know whether there are still
+   old duplicates in the system from earlier connection incarnations.
+
+   One way to deal with this problem is to deliberately delay emitting
+   segments for one MSL after recovery from a reboot -- this is the
+   "quiet time" specification.  Hosts that prefer to avoid waiting and
+   are willing to risk possible confusion of old and new packets at a
+   given destination may choose not to wait for the "quiet time".
+   Implementers may provide TCP users with the ability to select on a
+   connection-by-connection basis whether to wait after a reboot, or may
+   informally implement the "quiet time" for all connections.
+   Obviously, even where a user selects to "wait", this is not necessary
+   after the host has been "up" for at least MSL seconds.
+
+   To summarize: every segment emitted occupies one or more sequence
+   numbers in the sequence space, and the numbers occupied by a segment
+   are "busy" or "in use" until MSL seconds have passed.  Upon
+   rebooting, a block of space-time is occupied by the octets and SYN or
+   FIN flags of any potentially still in-flight segments.  If a new
+   connection is started too soon and uses any of the sequence numbers
+   in the space-time footprint of those potentially still in-flight
+   segments of the previous connection incarnation, there is a potential
+   sequence number overlap area that could cause confusion at the
+   receiver.
+
+   High-performance cases will have shorter cycle times than those in
+   the megabits per second that the base TCP design described above
+   considers.  At 1 Gbps, the cycle time is 34 seconds, only 3 seconds
+   at 10 Gbps, and around a third of a second at 100 Gbps.  In these
+   higher-performance cases, TCP Timestamp Options and Protection
+   Against Wrapped Sequences (PAWS) [47] provide the needed capability
+   to detect and discard old duplicates.
+
+3.5.  Establishing a Connection
+
+   The "three-way handshake" is the procedure used to establish a
+   connection.  This procedure normally is initiated by one TCP peer and
+   responded to by another TCP peer.  The procedure also works if two
+   TCP peers simultaneously initiate the procedure.  When simultaneous
+   open occurs, each TCP peer receives a SYN segment that carries no
+   acknowledgment after it has sent a SYN.  Of course, the arrival of an
+   old duplicate SYN segment can potentially make it appear, to the
+   recipient, that a simultaneous connection initiation is in progress.
+   Proper use of "reset" segments can disambiguate these cases.
+
+   Several examples of connection initiation follow.  Although these
+   examples do not show connection synchronization using data-carrying
+   segments, this is perfectly legitimate, so long as the receiving TCP
+   endpoint doesn't deliver the data to the user until it is clear the
+   data is valid (e.g., the data is buffered at the receiver until the
+   connection reaches the ESTABLISHED state, given that the three-way
+   handshake reduces the possibility of false connections).  It is a
+   trade-off between memory and messages to provide information for this
+   checking.
+
+   The simplest 3WHS is shown in Figure 6.  The figures should be
+   interpreted in the following way.  Each line is numbered for
+   reference purposes.  Right arrows (-->) indicate departure of a TCP
+   segment from TCP Peer A to TCP Peer B or arrival of a segment at B
+   from A.  Left arrows (<--) indicate the reverse.  Ellipses (...)
+   indicate a segment that is still in the network (delayed).  Comments
+   appear in parentheses.  TCP connection states represent the state
+   AFTER the departure or arrival of the segment (whose contents are
+   shown in the center of each line).  Segment contents are shown in
+   abbreviated form, with sequence number, control flags, and ACK field.
+   Other fields such as window, addresses, lengths, and text have been
+   left out in the interest of clarity.
+
+       TCP Peer A                                           TCP Peer B
+
+   1.  CLOSED                                               LISTEN
+
+   2.  SYN-SENT    --> <SEQ=100><CTL=SYN>               --> SYN-RECEIVED
+
+   3.  ESTABLISHED <-- <SEQ=300><ACK=101><CTL=SYN,ACK>  <-- SYN-RECEIVED
+
+   4.  ESTABLISHED --> <SEQ=101><ACK=301><CTL=ACK>       --> ESTABLISHED
+
+   5.  ESTABLISHED --> <SEQ=101><ACK=301><CTL=ACK><DATA> --> ESTABLISHED
+
+     Figure 6: Basic Three-Way Handshake for Connection Synchronization
+
+   In line 2 of Figure 6, TCP Peer A begins by sending a SYN segment
+   indicating that it will use sequence numbers starting with sequence
+   number 100.  In line 3, TCP Peer B sends a SYN and acknowledges the
+   SYN it received from TCP Peer A.  Note that the acknowledgment field
+   indicates TCP Peer B is now expecting to hear sequence 101,
+   acknowledging the SYN that occupied sequence 100.
+
+   At line 4, TCP Peer A responds with an empty segment containing an
+   ACK for TCP Peer B's SYN; and in line 5, TCP Peer A sends some data.
+   Note that the sequence number of the segment in line 5 is the same as
+   in line 4 because the ACK does not occupy sequence number space (if
+   it did, we would wind up ACKing ACKs!).
+
+   Simultaneous initiation is only slightly more complex, as is shown in
+   Figure 7.  Each TCP peer's connection state cycles from CLOSED to
+   SYN-SENT to SYN-RECEIVED to ESTABLISHED.
+
+       TCP Peer A                                       TCP Peer B
+
+   1.  CLOSED                                           CLOSED
+
+   2.  SYN-SENT     --> <SEQ=100><CTL=SYN>              ...
+
+   3.  SYN-RECEIVED <-- <SEQ=300><CTL=SYN>              <-- SYN-SENT
+
+   4.               ... <SEQ=100><CTL=SYN>              --> SYN-RECEIVED
+
+   5.  SYN-RECEIVED --> <SEQ=100><ACK=301><CTL=SYN,ACK> ...
+
+   6.  ESTABLISHED  <-- <SEQ=300><ACK=101><CTL=SYN,ACK> <-- SYN-RECEIVED
+
+   7.               ... <SEQ=100><ACK=301><CTL=SYN,ACK> --> ESTABLISHED
+
+             Figure 7: Simultaneous Connection Synchronization
+
+   A TCP implementation MUST support simultaneous open attempts (MUST-
+   10).
+
+   Note that a TCP implementation MUST keep track of whether a
+   connection has reached SYN-RECEIVED state as the result of a passive
+   OPEN or an active OPEN (MUST-11).
+
+   The principal reason for the three-way handshake is to prevent old
+   duplicate connection initiations from causing confusion.  To deal
+   with this, a special control message, reset, is specified.  If the
+   receiving TCP peer is in a non-synchronized state (i.e., SYN-SENT,
+   SYN-RECEIVED), it returns to LISTEN on receiving an acceptable reset.
+   If the TCP peer is in one of the synchronized states (ESTABLISHED,
+   FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT), it
+   aborts the connection and informs its user.  We discuss this latter
+   case under "half-open" connections below.
+
+       TCP Peer A                                           TCP Peer B
+
+   1.  CLOSED                                               LISTEN
+
+   2.  SYN-SENT    --> <SEQ=100><CTL=SYN>               ...
+
+   3.  (duplicate) ... <SEQ=90><CTL=SYN>               --> SYN-RECEIVED
+
+   4.  SYN-SENT    <-- <SEQ=300><ACK=91><CTL=SYN,ACK>  <-- SYN-RECEIVED
+
+   5.  SYN-SENT    --> <SEQ=91><CTL=RST>               --> LISTEN
+
+   6.              ... <SEQ=100><CTL=SYN>               --> SYN-RECEIVED
+
+   7.  ESTABLISHED <-- <SEQ=400><ACK=101><CTL=SYN,ACK>  <-- SYN-RECEIVED
+
+   8.  ESTABLISHED --> <SEQ=101><ACK=401><CTL=ACK>      --> ESTABLISHED
+
+                 Figure 8: Recovery from Old Duplicate SYN
+
+   As a simple example of recovery from old duplicates, consider
+   Figure 8.  At line 3, an old duplicate SYN arrives at TCP Peer B.
+   TCP Peer B cannot tell that this is an old duplicate, so it responds
+   normally (line 4).  TCP Peer A detects that the ACK field is
+   incorrect and returns a RST (reset) with its SEQ field selected to
+   make the segment believable.  TCP Peer B, on receiving the RST,
+   returns to the LISTEN state.  When the original SYN finally arrives
+   at line 6, the synchronization proceeds normally.  If the SYN at line
+   6 had arrived before the RST, a more complex exchange might have
+   occurred with RSTs sent in both directions.
+
+3.5.1.  Half-Open Connections and Other Anomalies
+
+   An established connection is said to be "half-open" if one of the TCP
+   peers has closed or aborted the connection at its end without the
+   knowledge of the other, or if the two ends of the connection have
+   become desynchronized owing to a failure or reboot that resulted in
+   loss of memory.  Such connections will automatically become reset if
+   an attempt is made to send data in either direction.  However, half-
+   open connections are expected to be unusual.
+
+   If at site A the connection no longer exists, then an attempt by the
+   user at site B to send any data on it will result in the site B TCP
+   endpoint receiving a reset control message.  Such a message indicates
+   to the site B TCP endpoint that something is wrong, and it is
+   expected to abort the connection.
+
+   Assume that two user processes A and B are communicating with one
+   another when a failure or reboot occurs causing loss of memory to A's
+   TCP implementation.  Depending on the operating system supporting A's
+   TCP implementation, it is likely that some error recovery mechanism
+   exists.  When the TCP endpoint is up again, A is likely to start
+   again from the beginning or from a recovery point.  As a result, A
+   will probably try to OPEN the connection again or try to SEND on the
+   connection it believes open.  In the latter case, it receives the
+   error message "connection not open" from the local (A's) TCP
+   implementation.  In an attempt to establish the connection, A's TCP
+   implementation will send a segment containin
